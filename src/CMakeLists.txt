@@ -2,6 +2,7 @@
 add_executable(
     acppsrv
     acppsrv.cpp
+    log.cpp
 )
 target_link_libraries(acppsrv SQLite::SQLite3)
 

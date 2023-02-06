@@ -24,6 +24,8 @@ set(
 )
 
 ### BEGIN Build configuration #################################################
+option(USE_LIBC++ "Use libc++ instead of libstdc++" OFF)
+
 set(
     BUILD_TYPE "RelWithDebInfo" CACHE STRING
     "Select a build type (${BUILD_TYPES})"
@@ -72,6 +74,10 @@ add_compile_options(
     -Wswitch-default -Wswitch-enum
     -Wno-mismatched-new-delete
 )
+if (USE_LIBC++)
+    add_compile_options(-stdlib=libc++)
+    add_link_options(-stdlib=libc++)
+endif()
 if (CMAKE_CXX_COMPILER_ID STREQUAL Clang)
     add_compile_options(-Wimplicit-fallthrough)
 endif()
@@ -172,6 +178,7 @@ message(
     "C++ compiler: ${CMAKE_CXX_COMPILER} ${CMAKE_CXX_COMPILER_ID} "
     ${CMAKE_CXX_COMPILER_VERSION}
 )
+message(STATUS "Use libc++:   ${USE_LIBC++}")
 message(STATUS "Clang-tidy:   ${CLANG_TIDY} ${CLANG_TIDY_VERSION}")
 message(STATUS "DEBUG:        ${ENABLE_TEMPORARY_DEBUG}")
 message(STATUS "Sanitizer:    ${SANITIZER}")

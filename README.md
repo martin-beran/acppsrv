@@ -16,6 +16,7 @@ file [LICENSE.md](LICENSE.html).
 
 ## Repository structure
 
+- `etc/` - configuration files
 - `src/` - source code
 - `test/` - automatic tests
 

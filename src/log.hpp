@@ -10,62 +10,72 @@ namespace acppsrv {
 
 class logger;
 
-class log {
+enum class log_level: int {
+    off = -1, // disable logging
+    emerg = 0, // this and following values are synced with syslog.h
+    alert = 1,
+    crit = 2,
+    err = 3,
+    warning = 4,
+    notice = 5,
+    info = 6,
+    debug = 7,
+};
+
+[[nodiscard]] constexpr bool valid(log_level level) noexcept
+{
+    return level >= log_level::off && level <= log_level::debug;
+}
+
+[[nodiscard]] std::string to_string(log_level level);
+
+[[nodiscard]] std::optional<log_level> from_string(std::string_view str);
+
+class log_msg {
 public:
-    enum class level {
-        emerg = 0,
-        alert = 1,
-        crit = 2,
-        err = 3,
-        warning = 4,
-        notice = 5,
-        info = 6,
-        debug = 7,
-    };
-    explicit log(level l);
-    log(logger& obj, level l);
-    log(const log&) = delete;
-    log(log&&) = delete;
-    ~log();
-    log& operator=(const log&) = delete;
-    log& operator=(log&&) = delete;
-    template <class T> log&& operator<<(T&& v) && {
+    explicit log_msg(log_level level);
+    log_msg(logger& obj, log_level level);
+    log_msg(const log_msg&) = delete;
+    log_msg(log_msg&&) = delete;
+    ~log_msg();
+    log_msg& operator=(const log_msg&) = delete;
+    log_msg& operator=(log_msg&&) = delete;
+    template <class T> log_msg&& operator<<(T&& v) && {
         if (_os)
             *_os << v;
         return std::move(*this);
     }
-    [[nodiscard]] static std::string to_string(level l);
 private:
     logger& _logger;
-    level _level;
+    log_level _level;
     std::optional<std::osyncstream> _os;
 };
 
-class DEBUG: public log {
+class DEBUG: public log_msg {
 #ifdef ENABLE_TEMPORARY_DEBUG
 public:
 #endif
-    DEBUG(): log(level::alert) {
-        std::move(*this) << " DEBUG";
+    DEBUG(): log_msg(log_level::emerg) {
+        std::move(*this) << "DEBUG ";
     }
 };
 
 class logger {
 public:
-    [[nodiscard]] log::level level() const noexcept {
+    [[nodiscard]] log_level level() const noexcept {
         return _level;
     }
-    void level(log::level l) noexcept {
-        _level = l;
+    void level(log_level level) noexcept {
+        _level = level;
     }
     static logger& global();
 private:
-    std::atomic<log::level> _level = log::level::info;
+    std::atomic<log_level> _level = log_level::info;
 };
 
-/*** log *********************************************************************/
+/*** log_msg *****************************************************************/
 
-inline log::log(level l): log(logger::global(), l)
+inline log_msg::log_msg(log_level level): log_msg(logger::global(), level)
 {
 }
 

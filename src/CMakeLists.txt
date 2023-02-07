@@ -1,10 +1,22 @@
+# Protobuf files
+protobuf_generate_cpp(PROTO_CPP PROTO_HPP configuration.proto)
+message("Protobuf generated headers: ${PROTO_HPP}")
+message("Protobuf generated sources: ${PROTO_CPP}")
+
 # The main ACppSrv executable
 add_executable(
     acppsrv
     acppsrv.cpp
+    configuration.cpp
     log.cpp
+    ${PROTO_CPP}
 )
-target_link_libraries(acppsrv SQLite::SQLite3)
+target_include_directories(acppsrv PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+target_link_libraries(
+    acppsrv
+    protobuf::libprotobuf
+    SQLite::SQLite3
+)
 
 # Check sources by clang-tidy
 find_program(CLANG_TIDY NAMES clang-tidy)

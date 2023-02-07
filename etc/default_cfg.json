@@ -1,0 +1,11 @@
+{
+    "log": {
+        "level": "info"
+    },
+    "thread_pools": {
+        "main": {
+        },
+        "control": {
+        }
+    }
+}

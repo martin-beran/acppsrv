@@ -1,0 +1,58 @@
+// Structure of a configuration file
+
+syntax = "proto3";
+
+package acppsrv.proto;
+
+// Logging configuration
+enum LogLevel {
+    option allow_alias = true;
+    // Levels are not the same as in log.hhp due to protobuf specifics
+    unspec = 0;
+    off = 1;
+    X = 2;
+    emerg = 2;
+    emergency = 2;
+    A = 3;
+    alert = 3;
+    C = 4;
+    crit = 4;
+    critical = 4;
+    E = 5;
+    err = 5;
+    error = 5;
+    W = 6;
+    warning = 6;
+    warn = 6;
+    N = 7;
+    notice = 7;
+    I = 8;
+    info = 8;
+    D = 9;
+    debug = 9;
+}
+
+message Log {
+    LogLevel level = 1;
+}
+
+// Definition of a thread pool
+message ThreadPool {
+    // The number of threads in the pool
+    uint32 threads = 1;
+}
+
+// Thread pools
+message ThreadPools {
+    // The main server client handling pool
+    ThreadPool main = 1;
+    //! The administrative control pool
+    ThreadPool control = 2;
+}
+
+/*** Top level configuration node ********************************************/
+
+message Configuration {
+    Log log = 1;
+    ThreadPools thread_pools = 2;
+}

@@ -101,6 +101,7 @@ add_compile_options(-UNDEBUG)
 
 # Used packages
 find_package(Boost 1.81 REQUIRED)
+find_package(Protobuf 3.12.4 REQUIRED)
 find_package(SQLite3 3.37 REQUIRED)
 find_package(Threads REQUIRED)
 

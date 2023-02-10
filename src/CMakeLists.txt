@@ -7,8 +7,10 @@ message("Protobuf generated sources: ${PROTO_CPP}")
 add_executable(
     acppsrv
     acppsrv.cpp
+    application.cpp
     configuration.cpp
     log.cpp
+    worker.cpp
     ${PROTO_CPP}
 )
 target_include_directories(acppsrv PRIVATE ${CMAKE_CURRENT_BINARY_DIR})

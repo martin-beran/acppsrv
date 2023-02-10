@@ -36,7 +36,7 @@ public:
     explicit log_msg(log_level level);
     log_msg(logger& obj, log_level level);
     log_msg(const log_msg&) = delete;
-    log_msg(log_msg&&) = delete;
+    log_msg(log_msg&&) = default;
     ~log_msg();
     log_msg& operator=(const log_msg&) = delete;
     log_msg& operator=(log_msg&&) = delete;

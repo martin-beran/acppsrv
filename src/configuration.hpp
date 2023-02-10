@@ -23,7 +23,9 @@ public:
     std::optional<log_level> get_log_level() const noexcept {
         return _log_level;
     }
+    static int num_threads(const proto::ThreadPool* cfg);
 private:
+    log_msg log_err(const std::filesystem::path& cfg_file) const;
     bool validate(const std::filesystem::path& cfg_file);
     bool _valid = false;
     proto::Configuration _cfg{};

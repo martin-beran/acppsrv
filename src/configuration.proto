@@ -39,7 +39,7 @@ message Log {
 // Definition of a thread pool
 message ThreadPool {
     // The number of threads in the pool
-    uint32 threads = 1;
+    int32 threads = 1;
 }
 
 // Thread pools

@@ -109,7 +109,7 @@ log_msg::log_msg(logger& obj, log_level level):
 
 log_msg::~log_msg()
 {
-    if (_os)
+    if (_os && _os->get_wrapped())
         *_os << std::endl;
 }
 

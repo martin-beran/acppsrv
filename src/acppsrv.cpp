@@ -1,4 +1,5 @@
 #include "log.hpp"
+#include "application.hpp"
 #include "configuration.hpp"
 
 #include <boost/asio.hpp>
@@ -38,6 +39,7 @@ int main(int argc, char* argv[])
     int result = EXIT_FAILURE;
     try {
         {
+            // Process command line
             log_msg(log_level::notice) << "Starting";
             if (argc != 2) {
                 usage(argv[0]);
@@ -45,16 +47,22 @@ int main(int argc, char* argv[])
             }
             std::filesystem::path cfg_file{argv[1]};
             log_msg(log_level::notice) << "Configuration file " << cfg_file;
+            // Read configuration
             configuration cfg{cfg_file};
             if (!cfg)
                 goto finish;
+            // Set log level
             if (auto ll = cfg.get_log_level()) {
                 logger::global().level(*ll);
                 log_msg(log_level::notice) << "Log level set to " <<
                     to_string(*ll);
             }
+            // Start operation
+            application app(cfg);
+            if (app.run())
+                result = EXIT_SUCCESS;
         }
-        result = EXIT_SUCCESS;
+        // Report unhandled exceptions and finish
 finish:
         if (result == EXIT_SUCCESS)
             log_msg(log_level::notice) << "Terminating successfully";

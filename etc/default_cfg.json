@@ -1,11 +1,12 @@
 {
     "log": {
-        "level": "info"
+        "level": "debug"
     },
     "thread_pools": {
         "main": {
         },
         "control": {
+            "threads": 1
         }
     }
 }

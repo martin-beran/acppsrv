@@ -5,7 +5,10 @@
 #include <google/protobuf/util/json_util.h>
 
 #include <fstream>
+#include <limits>
 #include <sstream>
+#include <thread>
+#include <type_traits>
 
 namespace acppsrv {
 
@@ -33,13 +36,28 @@ configuration::configuration(const std::filesystem::path& cfg_file)
     if (auto status = gpb::util::JsonStringToMessage(isb.str(), &_cfg, opts);
         !status.ok())
     {
-        log_msg(log_level::crit) << "Error in configuration file " <<
-            cfg_file << ": (" << status.error_code() << ") " <<
+        log_err(cfg_file) << "(" << status.error_code() << ") " <<
             status.error_message();
         return;
     }
     // Validate configuration
     _valid = validate(cfg_file);
+}
+
+log_msg configuration::log_err(const std::filesystem::path& cfg_file) const
+{
+    return log_msg(log_level::crit) << "Error in configuration file " <<
+        cfg_file << ": ";
+}
+
+int configuration::num_threads(const proto::ThreadPool* cfg)
+{
+    static_assert(std::is_same_v<
+                  std::common_type_t<int, decltype(cfg->threads())>, int>);
+    int n = cfg ? cfg->threads() : 0;
+    if (n == 0)
+        n = int(std::thread::hardware_concurrency());
+    return std::max(n, 1);
 }
 
 bool configuration::validate(const std::filesystem::path& cfg_file)
@@ -49,11 +67,29 @@ bool configuration::validate(const std::filesystem::path& cfg_file)
             if (auto ll = log_level(l - 2); acppsrv::valid(ll))
                 _log_level = ll;
             else {
-                log_msg(log_level::crit) << "Error in onfiguration file " <<
-                    cfg_file << ": Invalid log level " << l;
+                log_err(cfg_file) << "Invalid log level " << l;
                 return false;
             }
         }
+    if (data().has_thread_pools()) {
+        auto test = [this, &cfg_file](const proto::ThreadPool& p,
+                                      std::string_view name)
+        {
+            if (p.threads() < 0) {
+                log_err(cfg_file) << "Negative number of threads in pool " <<
+                    name;
+                return false;
+            }
+            return true;
+        };
+        using namespace std::string_view_literals;
+        auto&& tp = data().thread_pools();
+        if ((tp.has_main() && !test(tp.main(), "main"sv)) ||
+            (tp.has_control() && !test(tp.control(), "control"sv)))
+        {
+            return false;
+        }
+    }
     return true;
 }
 

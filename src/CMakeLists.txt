@@ -9,6 +9,7 @@ add_executable(
     acppsrv.cpp
     application.cpp
     configuration.cpp
+    http_server.cpp
     log.cpp
     worker.cpp
     ${PROTO_CPP}

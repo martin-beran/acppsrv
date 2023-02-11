@@ -1,5 +1,6 @@
 #include "application.hpp"
 #include "configuration.hpp"
+#include "http_server.hpp"
 #include "worker.hpp"
 #include <boost/asio/signal_set.hpp>
 
@@ -9,10 +10,12 @@ bool application::run()
 {
     auto tp = cfg.data().has_thread_pools() ?
         &cfg.data().thread_pools() : nullptr;
+    // Create threads pools
     thread_pool control_pool(tp && tp->has_control() ? &tp->control() : nullptr,
                              std::string{pool_control_name});
     thread_pool main_pool(tp && tp->has_main() ? &tp->main() : nullptr,
                           std::string{pool_main_name});
+    // Set up the control pool
     boost::asio::signal_set termsig{control_pool.ctx, SIGINT, SIGTERM};
     termsig.async_wait(
         [&main_pool](const boost::system::error_code& ec, int sig) {
@@ -35,6 +38,10 @@ bool application::run()
             }
             main_pool.stop();
         });
+    // Set up the main pool
+    http_server http_srv(cfg, main_pool);
+    http_srv.run();
+    // Start processing
     control_pool.run(false);
     main_pool.run(true);
     // We need pool's ctx to register an async op, so any async object

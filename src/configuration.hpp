@@ -10,6 +10,7 @@ namespace acppsrv {
 
 class configuration {
 public:
+    static constexpr uint16_t http_port_default = 80;
     explicit configuration(const std::filesystem::path& cfg_file);
     [[nodiscard]] bool valid() const noexcept {
         return _valid;
@@ -24,8 +25,10 @@ public:
         return _log_level;
     }
     static int num_threads(const proto::ThreadPool* cfg);
+    uint16_t http_port() const;
+    static std::optional<std::chrono::nanoseconds> get_time(float t);
 private:
-    log_msg log_err(const std::filesystem::path& cfg_file) const;
+    static log_msg log_err(const std::filesystem::path& cfg_file);
     bool validate(const std::filesystem::path& cfg_file);
     bool _valid = false;
     proto::Configuration _cfg{};

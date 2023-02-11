@@ -50,9 +50,23 @@ message ThreadPools {
     ThreadPool control = 2;
 }
 
+// HTTP server
+message HttpServer {
+    uint32 port = 1; // 0 = default (80)
+    uint32 listen_queue = 2; // 0 = default
+    uint32 max_connections = 3; // 0 = unlimited
+    float idle_timeout = 4; // 0 = unlimited
+    float keepalive_timeout = 5; // 0 = unlimited
+    uint32 keepalive_requests = 6; // 0 = unlimited
+    uint64 max_req_line = 7; // 0 = unlimited
+    uint64 max_req_headers = 8; // 0 = unlimited
+    uint64 max_req_body = 9; // 0 = unlimited
+}
+
 /*** Top level configuration node ********************************************/
 
 message Configuration {
     Log log = 1;
     ThreadPools thread_pools = 2;
+    HttpServer http_server = 3;
 }

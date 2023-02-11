@@ -8,5 +8,8 @@
         "control": {
             "threads": 1
         }
+    },
+    "http_server": {
+        "port": 80
     }
 }

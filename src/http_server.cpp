@@ -1,10 +1,13 @@
 #include "http_server.hpp"
 #include "configuration.hpp"
+#include "finally.hpp"
 #include "worker.hpp"
 
 #include <boost/asio.hpp>
 #include <boost/asio/redirect_error.hpp>
+#include <boost/asio/use_awaitable.hpp>
 #include <boost/system/detail/error_code.hpp>
+#include <exception>
 
 // declared const, but not constexpr or inline, therefore a definition is
 // needed at namespace scope
@@ -40,37 +43,114 @@ http_server::http_server(const configuration& cfg, thread_pool& workers):
     }
 }
 
-boost::asio::awaitable<void>
-http_server::handle_connection(boost::asio::ip::tcp::socket conn)
+template <boost::asio::completion_token_for<void()> CompletionToken>
+auto http_server::conn_limit(CompletionToken&& token)
 {
-    log_msg(log_level::info) << "Finished handling connection client=" <<
-        conn.remote_endpoint();
-    --active_connections;
-    co_return;
+    auto init = [this]<class Handler>(Handler&& handler) {
+        std::unique_lock lck{active_connections_mtx};
+        if (!max_connections || active_connections < *max_connections)
+            boost::asio::post(acceptor.get_executor(),
+                              std::forward<Handler>(handler));
+        else {
+            active_connections_hnd.emplace(std::forward<Handler>(handler));
+            lck.unlock();
+            log_msg(log_level::warning) <<
+                "Reached maximum number of connections " << *max_connections;
+        }
+    };
+    return boost::asio::async_initiate<CompletionToken, void()>(std::move(init),
+                                                                token);
 }
 
 boost::asio::awaitable<void> http_server::accept_loop()
 {
     for (;;) {
+        co_await conn_limit(boost::asio::use_awaitable);
+        {
+            auto msg = log_msg(log_level::debug) <<
+                "Waiting for connection active_connections=" <<
+                active_connections << " maximum=";
+            log_limit(msg, max_connections);
+        }
         auto [ec, conn] = co_await acceptor.async_accept(
                              boost::asio::as_tuple(boost::asio::use_awaitable));
         if (ec)
             log_msg(log_level::err) << "Cannot accept connection: " <<
                 ec.message();
-        else {
-            auto ac = ++active_connections;
-            log_msg(log_level::info) << "Accepted connection client=" <<
-                conn.remote_endpoint() << " active=" << ac;
-            co_spawn(workers.ctx, handle_connection(std::move(conn)),
-                     boost::asio::detached);
+        else
+            if (auto client = conn.remote_endpoint(ec); ec) {
+                log_msg(log_level::err) << "Cannot get client address: " <<
+                    ec.message();
+            } else {
+                auto ac = ++active_connections;
+                {
+                    auto msg = log_msg(log_level::info) <<
+                        "Accepted connection client=" <<
+                        conn.remote_endpoint() << " active=" << ac <<
+                        " maximum=";
+                    log_limit(msg, max_connections);
+                }
+                co_spawn(workers.ctx, handle_connection(std::move(conn),
+                                                        std::move(client)),
+                         co_spawn_handler);
         }
     }
+}
+
+void http_server::co_spawn_handler(std::exception_ptr e)
+{
+    if (e)
+        std::rethrow_exception(e);
+}
+
+template <class Endpoint>
+void http_server::active_connection_end(const Endpoint& client)
+{
+    std::unique_lock lck{active_connections_mtx};
+    auto ac = --active_connections;
+    if (max_connections && active_connections < *max_connections &&
+        active_connections_hnd)
+    {
+        auto hnd = std::move(*active_connections_hnd);
+        active_connections_hnd.reset();
+        boost::asio::post(acceptor.get_executor(), std::move(hnd));
+    }
+    lck.unlock();
+    auto msg = log_msg(log_level::info) <<
+        "Finished handling connection client=" << client << " active=" << ac <<
+        " maximum=";
+    log_limit(msg, max_connections);
+}
+
+boost::asio::awaitable<void>
+http_server::handle_connection(socket_type conn, endpoint_type client)
+{
+    util::finally at_end([this, &client]() { active_connection_end(client); });
+    log_msg(log_level::debug) << "Waiting for data from client";
+    boost::system::error_code ec;
+    std::array<char, 1> buf{};
+    co_await conn.async_read_some(boost::asio::buffer(buf),
+                         boost::asio::redirect_error(boost::asio::use_awaitable,
+                                                     ec));
+    if (ec)
+        log_msg(log_level::err) << "Cannot read from client " << client <<
+            ": " << ec.message();
+    co_return;
+}
+
+template <class T> void http_server::log_limit(log_msg& msg,
+                                               const std::optional<T>& limit)
+{
+    if (limit)
+        msg << *limit;
+    else
+        msg << "unlimited";
 }
 
 bool http_server::run()
 {
     boost::system::error_code ec;
-    boost::asio::ip::tcp::endpoint addr{boost::asio::ip::address{}, port};
+    endpoint_type addr{boost::asio::ip::address{}, port};
     assert(addr.address().is_unspecified());
     acceptor.open(addr.protocol());
     if (ec) {
@@ -100,7 +180,7 @@ bool http_server::run()
         return false;
     }
     boost::asio::co_spawn(acceptor.get_executor(), accept_loop(),
-                          boost::asio::detached);
+                          co_spawn_handler);
     return true;
 }
 

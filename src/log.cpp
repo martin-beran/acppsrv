@@ -100,10 +100,9 @@ log_msg::log_msg(logger& obj, log_level level):
         static constexpr size_t time_end = 26; // after .000000
         std::copy(usec.begin(), usec.end(),
                   buf.data() + time_end - usec.size());
-        std::move(*this) << buf.data();
-        std::move(*this) << " [" << getpid();
-        std::move(*this) << '.' << std::this_thread::get_id() << ']';
-        std::move(*this) << ' ' << to_string(_level) << ' ';
+        *this << buf.data();
+        *this << " [" << getpid() << '.' << std::this_thread::get_id() << ']';
+        *this << ' ' << to_string(_level) << ' ';
     }
 }
 

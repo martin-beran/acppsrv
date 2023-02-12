@@ -13,7 +13,7 @@ namespace impl {
 //! Requirements for a template argument of coro::finally
 /*! \tparam F a callable type */
 template <class F>
-concept finally_fun = std::is_nothrow_invocable_v<F>;
+concept finally_fun = std::is_invocable_v<F>;
 
 } // namespace impl
 
@@ -25,7 +25,7 @@ template <impl::finally_fun F> class finally {
 public:
     //! Registers a function to be called at a scope end.
     /*! \param[in] f a function */
-    explicit finally(F&& f) noexcept: f(std::move(f)) {}
+    explicit finally(F&& f) noexcept(noexcept(f())): f(std::move(f)) {}
     //! No copying
     finally(const finally&) = delete;
     //! No moving

@@ -27,13 +27,14 @@ bool application::run()
                     "Received termination signal ";
                 switch (sig) {
                 case SIGINT:
-                std::move(msg) << "SIGINT";
+                    msg << "SIGINT";
                     break;
                 case SIGTERM:
-                std::move(msg) << "SIGTERM";
+                    msg << "SIGTERM";
                     break;
                 default:
-                std::move(msg) << sig;
+                    msg << sig;
+                    break;
                 }
             }
             main_pool.stop();

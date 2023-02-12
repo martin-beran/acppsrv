@@ -40,7 +40,7 @@ public:
     ~log_msg();
     log_msg& operator=(const log_msg&) = delete;
     log_msg& operator=(log_msg&&) = delete;
-    template <class T> log_msg&& operator<<(T&& v) && {
+    template <class T> log_msg&& operator<<(T&& v) {
         if (_os)
             *_os << v;
         return std::move(*this);
@@ -56,7 +56,7 @@ class DEBUG: public log_msg {
 public:
 #endif
     DEBUG(): log_msg(log_level::emerg) {
-        std::move(*this) << "DEBUG ";
+        *this << "DEBUG ";
     }
 };
 

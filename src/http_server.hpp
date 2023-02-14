@@ -5,6 +5,8 @@
 #include <boost/asio/async_result.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/use_awaitable.hpp>
+#include <boost/beast.hpp>
+#include <boost/beast/http/string_body.hpp>
 #include <chrono>
 #include <coroutine>
 #include <exception>
@@ -22,6 +24,9 @@ public:
     using socket_type = protocol_type::socket;
     using acceptor_type = protocol_type::acceptor;
     using endpoint_type = socket_type::endpoint_type;
+    using http_body_type = boost::beast::http::string_body;
+    using http_req_type = boost::beast::http::request<http_body_type>;
+    using http_resp_type = boost::beast::http::response<http_body_type>;
     static_assert(std::is_same_v<endpoint_type, acceptor_type::endpoint_type>);
     http_server(const configuration& cfg, thread_pool& workers);
     http_server(const http_server&) = delete;
@@ -34,12 +39,15 @@ private:
     boost::asio::awaitable<void> accept_loop();
     boost::asio::awaitable<void>
         handle_connection(socket_type conn, endpoint_type client);
+    boost::asio::awaitable<http_resp_type>
+        handle_request(const http_req_type& request,
+                       const endpoint_type& client);
     template <boost::asio::completion_token_for<void()> CompletionToken>
         auto conn_limit(CompletionToken&& token);
     template <class Endpoint>
         void active_connection_end(const Endpoint& client);
-    template <class T> void log_limit(log_msg& msg,
-                                      const std::optional<T>& limit);
+    template <std::integral T> std::variant<std::string_view, T>
+        log_limit(const std::optional<T>& limit);
     static void co_spawn_handler(std::exception_ptr e);
     uint16_t port;
     std::optional<uint32_t> listen_queue;
@@ -47,7 +55,6 @@ private:
     std::optional<std::chrono::nanoseconds> idle_timeout;
     std::optional<std::chrono::nanoseconds> keepalive_timeout;
     std::optional<uint32_t> keepalive_requests;
-    std::optional<uint32_t> max_request_line;
     std::optional<uint32_t> max_request_headers;
     std::optional<uint32_t> max_request_body;
     thread_pool& workers;
@@ -57,7 +64,6 @@ private:
     std::optional<boost::asio::async_result<
         boost::asio::use_awaitable_t<decltype(acceptor)::executor_type>,
         void()>::handler_type> active_connections_hnd;
-
 };
 
 } // namespace acppsrv

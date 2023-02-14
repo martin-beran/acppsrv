@@ -5,6 +5,7 @@
 #include <optional>
 #include <string>
 #include <syncstream>
+#include <variant>
 
 namespace acppsrv {
 
@@ -40,9 +41,20 @@ public:
     ~log_msg();
     log_msg& operator=(const log_msg&) = delete;
     log_msg& operator=(log_msg&&) = delete;
-    template <class T> log_msg&& operator<<(T&& v) {
+    template <class T> log_msg& operator<<(T&& v) & {
         if (_os)
             *_os << v;
+        return *this;
+    }
+    template <class ...T> log_msg& operator<<(std::variant<T...>&& v) & {
+        if (_os)
+            std::visit([this]<class V>(V&& v) {
+                *_os << std::forward<V>(v);
+            }, std::forward<std::variant<T...>>(v));
+        return *this;
+    }
+    template <class T> log_msg&& operator<<(T&& v) && {
+        *this << std::forward<T>(v);
         return std::move(*this);
     }
 private:

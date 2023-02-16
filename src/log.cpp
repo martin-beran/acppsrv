@@ -82,8 +82,8 @@ std::optional<log_level> from_string(std::string_view str)
 
 /*** log_msg *****************************************************************/
 
-log_msg::log_msg(logger& obj, log_level level):
-     _logger(obj), _level(level)
+log_msg::log_msg(logger& obj, log_level level, session_type session):
+     _logger(obj), _level(level), _session(session)
 {
     namespace sc = std::chrono;
     if (_level > log_level::off && _level <= _logger.level()) {
@@ -96,12 +96,16 @@ log_msg::log_msg(logger& obj, log_level level):
                            1'000'000);
         tm t{};
         localtime_r(&time, &t);
-        assert(strftime(buf.data(), buf.size(), "%FT%T.000000%z", &t) != 0);
+        assert(strftime(buf.data(), buf.size(), "%F %T.000000%z", &t) != 0);
         static constexpr size_t time_end = 26; // after .000000
         std::copy(usec.begin(), usec.end(),
                   buf.data() + time_end - usec.size());
         *this << buf.data();
-        *this << " [" << getpid() << '.' << std::this_thread::get_id() << ']';
+        *this << " [" << getpid() << '.' << std::this_thread::get_id();
+        for (auto&& s: session)
+            if (s)
+                *this << '.' << *s;
+        *this << ']';
         *this << ' ' << to_string(_level) << ' ';
     }
 }

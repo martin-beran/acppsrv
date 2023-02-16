@@ -4,11 +4,9 @@
 #include "worker.hpp"
 
 #include <boost/asio.hpp>
-#include <boost/asio/redirect_error.hpp>
-#include <boost/asio/use_awaitable.hpp>
-#include <boost/system/detail/error_code.hpp>
 #include <exception>
 
+using namespace std::string_literals;
 using namespace std::string_view_literals;
 
 // declared const, but not constexpr or inline, therefore a definition is
@@ -17,31 +15,9 @@ const int boost::asio::socket_base::max_listen_connections;
 
 namespace acppsrv {
 
-http_server::http_server(const configuration& cfg, thread_pool& workers):
-    port(cfg.http_port()), workers(workers), acceptor(workers.ctx)
-{
-    if (cfg.data().has_http_server()) {
-        auto&& http = cfg.data().http_server();
-        if (auto v = http.listen_queue(); v != 0) {
-            // An int value is needed for listen queue, ensure correct
-            // conversion with capping at the max. int
-            using ct = std::common_type_t<int, decltype(v)>;
-            if (auto m = std::numeric_limits<int>::max(); ct(v) > ct(m))
-                v = decltype(v)(m);
-            listen_queue = v;
-        }
-        if (auto v = http.max_connections())
-            max_connections = v;
-        idle_timeout = configuration::get_time(http.idle_timeout());
-        keepalive_timeout = configuration::get_time(http.keepalive_timeout());
-        if (auto v = http.keepalive_requests())
-            keepalive_requests = v;
-        if (auto v = http.max_req_headers())
-            max_request_headers = v;
-        if (auto v = http.max_req_body())
-            max_request_body = v;
-    }
-}
+/*** http_server (templates) *************************************************/
+
+// These must be defined before they are used
 
 template <boost::asio::completion_token_for<void()> CompletionToken>
 auto http_server::conn_limit(CompletionToken&& token)
@@ -62,6 +38,34 @@ auto http_server::conn_limit(CompletionToken&& token)
                                                                 token);
 }
 
+/*** http_server *************************************************************/
+
+http_server::http_server(const configuration& cfg, thread_pool& workers):
+    port(cfg.http_port()), workers(workers), acceptor(workers.ctx)
+{
+    if (cfg.data().has_http_server()) {
+        auto&& http = cfg.data().http_server();
+        if (auto v = http.listen_queue(); v != 0) {
+            // An int value is needed for listen queue, ensure correct
+            // conversion with capping at the max. int
+            using ct = std::common_type_t<int, decltype(v)>;
+            if (auto m = std::numeric_limits<int>::max(); ct(v) > ct(m))
+                v = decltype(v)(m);
+            listen_queue = v;
+        }
+        if (auto v = http.max_connections())
+            max_connections = v;
+        idle_timeout = configuration::get_time(http.idle_timeout());
+        keepalive_timeout = configuration::get_time(http.keepalive_timeout());
+        if (auto v = http.keepalive_requests())
+            keepalive_requests = v;
+        if (auto v = http.max_request_headers())
+            max_request_headers = v;
+        if (auto v = http.max_request_body())
+            max_request_body = v;
+    }
+}
+
 boost::asio::awaitable<void> http_server::accept_loop()
 {
     for (;;) {
@@ -70,6 +74,7 @@ boost::asio::awaitable<void> http_server::accept_loop()
             "Waiting for connection active_connections=" <<
             active_connections << " maximum=" << log_limit(max_connections);
         auto [ec, conn] = co_await acceptor.async_accept(
+                             boost::asio::make_strand(acceptor.get_executor()),
                              boost::asio::as_tuple(boost::asio::use_awaitable));
         if (ec)
             log_msg(log_level::err) << "Cannot accept connection: " <<
@@ -80,24 +85,23 @@ boost::asio::awaitable<void> http_server::accept_loop()
                     ec.message();
             } else {
                 auto ac = ++active_connections;
-                log_msg(log_level::info) << "Accepted connection client=" <<
-                    conn.remote_endpoint() << " active=" << ac <<
+                uint64_t sid = session++;
+                log_msg(log_level::info, {sid}) <<
+                    "Accepted connection client=" << conn.remote_endpoint() <<
+                    " active=" << ac <<
                     " maximum=" << log_limit(max_connections);
-                co_spawn(workers.ctx, handle_connection(std::move(conn),
-                                                        std::move(client)),
+                co_spawn(conn.get_executor(),
+                         handle_connection(std::move(conn), std::move(client),
+                                           sid),
                          co_spawn_handler);
         }
     }
 }
 
-void http_server::co_spawn_handler(std::exception_ptr e)
-{
-    if (e)
-        std::rethrow_exception(e);
-}
-
 template <class Endpoint>
-void http_server::active_connection_end(const Endpoint& client)
+void http_server::active_connection_end(const Endpoint& client, uint64_t sid,
+                                        const boost::system::error_code& ec,
+                                        std::string_view stage)
 {
     std::unique_lock lck{active_connections_mtx};
     auto ac = --active_connections;
@@ -109,35 +113,110 @@ void http_server::active_connection_end(const Endpoint& client)
         boost::asio::post(acceptor.get_executor(), std::move(hnd));
     }
     lck.unlock();
-    log_msg(log_level::info) <<
+    auto msg = log_msg(ec ? log_level::err : log_level::info, {sid}) <<
         "Finished handling connection client=" << client << " active=" << ac <<
         " maximum=" << log_limit(max_connections);
+    if (ec)
+        msg << " stage=" << stage << " error=" << ec.message();
+}
+
+void http_server::before_request_timeout(boost::beast::tcp_stream& stream,
+                                         bool first)
+{
+    auto& timeout = first ? idle_timeout : keepalive_timeout;
+    if (timeout)
+        stream.expires_after(*timeout);
+    else
+        stream.expires_never();
+}
+
+void http_server::co_spawn_handler(std::exception_ptr e)
+{
+    if (e)
+        std::rethrow_exception(e);
 }
 
 boost::asio::awaitable<void>
-http_server::handle_connection(socket_type conn, endpoint_type client)
+http_server::handle_connection(socket_type conn, endpoint_type client,
+                               uint64_t sid)
 {
-    util::finally at_end([this, &client]() { active_connection_end(client); });
-    log_msg(log_level::debug) << "Waiting for data from client";
-    //boost::system::error_code ec;
-    for (uint32_t req_n = 1;
-         !keepalive_requests || req_n - 1U < *keepalive_requests;
+    boost::system::error_code ec;
+    std::string_view stage = {};
+    util::finally at_end([this, &client, sid, &ec, &stage]() {
+        active_connection_end(client, sid, ec, stage);
+    });
+    log_msg(log_level::debug, {sid}) << "Waiting for data from client";
+    boost::beast::tcp_stream stream(std::move(conn));
+    boost::beast::flat_buffer buffer;
+    for (auto [req_n, close] = std::pair{uint64_t{1}, false};
+         !close && (!keepalive_requests || req_n - 1U < *keepalive_requests);
          ++ req_n)
     {
-        log_msg(log_level::debug) << "Waiting for request " << req_n << '/' <<
-            log_limit(keepalive_requests) << " client=" << client;
-        http_req_type request;
-        http_resp_type response = co_await handle_request(request, client);
+        stage = ""sv;
+        log_msg(log_level::debug, {sid, req_n}) << "Waiting for request " <<
+            req_n << '/' << log_limit(keepalive_requests);
+        boost::beast::http::request_parser<http_body_type> parser;
+        if (max_request_headers)
+            parser.header_limit(*max_request_headers);
+        if (max_request_body)
+            parser.body_limit(*max_request_body);
+        before_request_timeout(stream, req_n == 1);
+        co_await boost::beast::http::async_read_header(
+            stream, buffer, parser,
+            boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+        stage = "read_request_headers";
+        if (ec)
+            goto abort_connection;
+        http_request_type& request = parser.get();
+        log_msg(log_level::info, {sid, req_n}) << "Request headers" <<
+            " method=" << request.method_string() <<
+            " uri=" << request.target() <<
+            " version=" << request.version() / 10 << '.' <<
+            request.version() % 10;
+        // Create a response
+        http_response_type response = co_await handle_request(request, sid,
+                                                              req_n);
+        if (!response.keep_alive())
+            close = true;
+        // Send the response
+        stream.expires_never();
+        co_await boost::beast::http::async_write(
+            stream, response,
+            boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+        stage = "write_response";
+        if (ec)
+            goto abort_connection;
+        auto msg = log_msg(log_level::info, {sid, req_n}) <<
+            "Request " << req_n << '/' <<
+            log_limit(keepalive_requests) <<
+            " finished method=" << request.method_string() <<
+            " uri=" << request.target() <<
+            " status=" << response.result_int();
+        if (auto size = response.payload_size())
+            msg << " content_length=" << *size;
     }
+    ec = {};
+    stage = ""sv;
+abort_connection:
     co_return;
 }
 
-boost::asio::awaitable<http_server::http_resp_type>
-http_server::handle_request(const http_req_type& /*request*/,
-                            const endpoint_type& /*client*/)
+boost::asio::awaitable<http_server::http_response_type>
+http_server::handle_request(const http_request_type& request, uint64_t sid,
+                            uint64_t req_n)
 {
-    http_resp_type response;
+    http_response_type response;
+    response.keep_alive(request.keep_alive());
+    DEBUG({sid, req_n}) << "Generating response";
     co_return response;
+}
+
+void http_server::in_request_timeout(boost::beast::tcp_stream& stream)
+{
+    if (idle_timeout)
+        stream.expires_after(*idle_timeout);
+    else
+        stream.expires_never();
 }
 
 template <std::integral T> std::variant<std::string_view, T>

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <array>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -34,8 +35,9 @@ enum class log_level: int {
 
 class log_msg {
 public:
-    explicit log_msg(log_level level);
-    log_msg(logger& obj, log_level level);
+    using session_type = std::array<std::optional<uint64_t>, 2>;
+    explicit log_msg(log_level level, session_type session = {});
+    log_msg(logger& obj, log_level level, session_type = {});
     log_msg(const log_msg&) = delete;
     log_msg(log_msg&&) = default;
     ~log_msg();
@@ -61,13 +63,16 @@ private:
     logger& _logger;
     log_level _level;
     std::optional<std::osyncstream> _os;
+    std::optional<session_type> _session;
 };
 
 class DEBUG: public log_msg {
 #ifdef ENABLE_TEMPORARY_DEBUG
 public:
 #endif
-    DEBUG(): log_msg(log_level::emerg) {
+    explicit DEBUG(session_type session = {}):
+        log_msg(log_level::emerg, session)
+    {
         *this << "DEBUG ";
     }
 };
@@ -87,7 +92,8 @@ private:
 
 /*** log_msg *****************************************************************/
 
-inline log_msg::log_msg(log_level level): log_msg(logger::global(), level)
+inline log_msg::log_msg(log_level level, session_type session):
+    log_msg(logger::global(), level, session)
 {
 }
 

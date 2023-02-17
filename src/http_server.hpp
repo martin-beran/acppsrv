@@ -32,6 +32,7 @@ public:
     http_server& operator=(http_server&&) = delete;
     bool run();
 private:
+    struct conn_limit_init;
     boost::asio::awaitable<void> accept_loop();
     // Expects that conn uses a strand as its executor
     boost::asio::awaitable<void>
@@ -49,7 +50,7 @@ private:
     void in_request_timeout(boost::beast::tcp_stream& stream);
     template <std::integral T> std::variant<std::string_view, T>
         log_limit(const std::optional<T>& limit);
-    static void co_spawn_handler(std::exception_ptr e);
+    static void co_spawn_handler(const std::exception_ptr& e);
     uint16_t port;
     std::optional<uint32_t> listen_queue;
     std::optional<uint32_t> max_connections;

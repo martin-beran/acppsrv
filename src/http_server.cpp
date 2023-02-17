@@ -5,6 +5,7 @@
 
 #include <boost/asio.hpp>
 #include <exception>
+#include <optional>
 
 using namespace std::string_literals;
 using namespace std::string_view_literals;
@@ -17,25 +18,36 @@ namespace acppsrv {
 
 /*** http_server (templates) *************************************************/
 
-// These must be defined before they are used
+// These must be defined before they are used, so not in lexicographic order
+
+struct http_server::conn_limit_init {
+    explicit conn_limit_init(http_server& self,
+                             std::unique_lock<std::mutex>&& lck):
+        self{self}, lck{std::move(lck)} {}
+    http_server& self;
+    std::unique_lock<std::mutex> lck;
+    template <class Handler> auto operator()(Handler&& handler) {
+        self.active_connections_hnd.emplace(std::forward<Handler>(handler));
+        lck.unlock();
+        log_msg(log_level::warning) <<
+            "Reached maximum number of connections " << *self.max_connections;
+    }
+};
 
 template <boost::asio::completion_token_for<void()> CompletionToken>
 auto http_server::conn_limit(CompletionToken&& token)
 {
-    auto init = [this]<class Handler>(Handler&& handler) {
-        std::unique_lock lck{active_connections_mtx};
-        if (!max_connections || active_connections < *max_connections)
-            boost::asio::post(acceptor.get_executor(),
-                              std::forward<Handler>(handler));
-        else {
-            active_connections_hnd.emplace(std::forward<Handler>(handler));
-            lck.unlock();
-            log_msg(log_level::warning) <<
-                "Reached maximum number of connections " << *max_connections;
-        }
+    std::unique_lock lck{active_connections_mtx};
+    auto async_initiate = []<class Init>(Init&& init, CompletionToken&& token) {
+        return boost::asio::async_initiate<CompletionToken, void()>(
+                                            std::forward<Init>(init), token);
     };
-    return boost::asio::async_initiate<CompletionToken, void()>(std::move(init),
-                                                                token);
+    conn_limit_init init{*this, std::move(lck)};
+    using result_t = decltype(async_initiate(std::move(init), token));
+    if (max_connections && active_connections >= *max_connections)
+        return std::optional<result_t>(async_initiate(std::move(init), token));
+    else
+        return std::optional<result_t>{};
 }
 
 /*** http_server *************************************************************/
@@ -69,7 +81,8 @@ http_server::http_server(const configuration& cfg, thread_pool& workers):
 boost::asio::awaitable<void> http_server::accept_loop()
 {
     for (;;) {
-        co_await conn_limit(boost::asio::use_awaitable);
+        if (auto cl = conn_limit(boost::asio::use_awaitable))
+            co_await std::move(*cl);
         log_msg(log_level::debug) <<
             "Waiting for connection active_connections=" <<
             active_connections << " maximum=" << log_limit(max_connections);
@@ -130,7 +143,7 @@ void http_server::before_request_timeout(boost::beast::tcp_stream& stream,
         stream.expires_never();
 }
 
-void http_server::co_spawn_handler(std::exception_ptr e)
+void http_server::co_spawn_handler(const std::exception_ptr& e)
 {
     if (e)
         std::rethrow_exception(e);

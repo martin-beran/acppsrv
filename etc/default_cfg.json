@@ -10,6 +10,7 @@
         }
     },
     "http_server": {
+        "keepalive_requests": 100,
         "port": 8080
     }
 }

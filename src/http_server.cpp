@@ -256,7 +256,7 @@ http_server::handle_connection(socket_type conn, endpoint_type client,
         stat->data.data_resp += response.body().size();
         response.set(boost::beast::http::field::server, header_server);
         keepalive = request.keep_alive() &&
-            (!keepalive_requests || req_n <= *keepalive_requests);
+            (!keepalive_requests || req_n < *keepalive_requests);
         response.keep_alive(keepalive);
         // Send the response
         stream.expires_never();

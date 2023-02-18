@@ -25,6 +25,7 @@ set(
 
 ### BEGIN Build configuration #################################################
 option(USE_LIBC++ "Use libc++ instead of libstdc++" OFF)
+option(USE_LTO "Use LTO (link time, interprocedural optimization)" ON)
 
 set(
     BUILD_TYPE "RelWithDebInfo" CACHE STRING
@@ -43,6 +44,8 @@ endif()
 if (NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE ${BUILD_TYPE})
 endif()
+
+set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ${USE_LTO})
 
 set_property(CACHE SANITIZER PROPERTY STRINGS ${SANITIZERS})
 if (NOT SANITIZER IN_LIST SANITIZERS)
@@ -182,5 +185,6 @@ message(
 )
 message(STATUS "Use libc++:   ${USE_LIBC++}")
 message(STATUS "Clang-tidy:   ${CLANG_TIDY} ${CLANG_TIDY_VERSION}")
+message(STATUS "Use LTO:      ${USE_LTO}")
 message(STATUS "DEBUG:        ${ENABLE_TEMPORARY_DEBUG}")
 message(STATUS "Sanitizer:    ${SANITIZER}")

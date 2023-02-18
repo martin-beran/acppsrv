@@ -2,6 +2,7 @@
 protobuf_generate_cpp(
     PROTO_CPP PROTO_HPP
     configuration.proto
+    http_hnd_db.proto
     http_hnd_stat.proto
 )
 message("Protobuf generated headers: ${PROTO_HPP}")
@@ -17,9 +18,10 @@ add_executable(
     application.cpp
     configuration.cpp
     db_server.cpp
-    http_server.cpp
+    http_hnd_db.cpp
     http_hnd_echo.cpp
     http_hnd_stat.cpp
+    http_server.cpp
     log.cpp
     sqlite3.cpp
     worker.cpp

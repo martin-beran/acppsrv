@@ -1,5 +1,6 @@
 #include "db_server.hpp"
 #include "configuration.hpp"
+#include "http_hnd_db.pb.h"
 #include "log.hpp"
 #include "worker.hpp"
 #include <tuple>
@@ -11,7 +12,17 @@ db_server::db_server(const proto::SQLite3* cfg, thread_pool& workers):
     cfg(cfg), workers(workers)
 {
 }
-    
+
+void db_server::interrupt()
+{
+    for (size_t tidx = 1; auto&& db_map: databases) {
+        log_msg(log_level::debug) << "Interrupting database thread " <<
+            tidx++ << '/' << workers.size();
+        for (auto&& db: db_map)
+            db.second.db.interrupt();
+    }
+}
+
 bool db_server::run()
 {
     try {
@@ -48,6 +59,18 @@ bool db_server::run()
         return false;
     }
     return true;
+}
+
+http_hnd::proto::db::Response
+db_server::run_query(http_hnd::proto::db::Request& request)
+{
+    http_hnd::proto::db::Response response;
+    DEBUG() << "Running database=\"" << request.db() <<
+        "\" query=\"" << request.query() << '"' <<
+        " thread=" << thread_pool::this_thread() << '/' << workers.size();
+    response.set_ok(true);
+    response.set_msg("ok");
+    return response;
 }
 
 } // namespace acppsrv

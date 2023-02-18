@@ -56,6 +56,15 @@ connection::connection(std::string file):
 
 connection::~connection() = default;
 
+void connection::interrupt()
+{
+    if (_impl->db) {
+        sqlite3_interrupt(_impl->db);
+        log_msg(log_level::debug) << "Interrupted database file \"" << _file <<
+            '"';
+    }
+}
+
 /*** query::impl *************************************************************/
 
 class query::impl {

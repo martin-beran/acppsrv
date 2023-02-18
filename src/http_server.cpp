@@ -3,6 +3,7 @@
 #include "finally.hpp"
 #include "worker.hpp"
 
+#include "http_hnd_db.hpp"
 #include "http_hnd_echo.hpp"
 #include "http_hnd_stat.hpp"
 
@@ -64,7 +65,8 @@ auto http_server::conn_limit(CompletionToken&& token)
 
 http_server::http_server(const configuration& cfg, thread_pool& workers,
                          std::string_view app_name,
-                         std::string_view app_version):
+                         std::string_view app_version,
+                         db_server& db_srv):
     header_server(std::string(app_name) + "/" + std::string(app_version)),
     port(cfg.http_port()), workers(workers), acceptor(workers.ctx)
 {
@@ -90,6 +92,7 @@ http_server::http_server(const configuration& cfg, thread_pool& workers,
             max_request_body = v;
     }
     // Initialize handlers
+    handlers["/db"] = std::make_unique<http_hnd::db>(db_srv);
     handlers["/echo"] = std::make_unique<http_hnd::echo>();
     auto p_stat = std::make_unique<http_hnd::stat>();
     stat = p_stat.get();

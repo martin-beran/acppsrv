@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package acppsrv.http_hnd.proto.db;
+
+enum Null {
+    NULL = 0;
+}
+
+message Value {
+    oneof val {
+        Null v_null = 1;
+        int64 v_int64 = 2;
+        double v_double = 3;
+        string v_text = 4;
+    }
+}
+
+message Row {
+    repeated Value columns = 1;
+}
+
+message Request {
+    string db = 1;
+    string query = 2;
+    repeated Value args = 3;
+}
+
+message Response {
+    bool ok = 1;
+    string msg = 2;
+    repeated Row rows = 3;
+}

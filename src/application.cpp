@@ -21,12 +21,20 @@ bool application::run()
     thread_pool database_pool(tp && tp->has_database() ?
                               &tp->database() : nullptr,
                               std::string{pool_database_name});
+    // Set up the database pool
+    db_server db_srv(cfg.data().has_databases() ?
+                         &cfg.data().databases() : nullptr,
+                     database_pool);
+    if (!db_srv.run()) {
+        log_msg(log_level::crit) << "Cannot initialize database server";
+        return false;
+    }
     // Set up the control pool
     boost::asio::signal_set termsig{control_pool.ctx, SIGINT, SIGTERM};
     termsig.async_wait(
-        [&main_pool, &database_pool](const boost::system::error_code& ec,
-                                     int sig)
-        {
+        [&main_pool, &database_pool, &db_srv](
+            const boost::system::error_code& ec, int sig
+        ) {
             if (ec)
                 log_msg(log_level::warning) <<
                     "Waiting for termination signal failed: " << ec.message();
@@ -47,19 +55,12 @@ bool application::run()
             }
             main_pool.stop();
             database_pool.stop();
+            db_srv.interrupt();
         });
     // Set up the main pool
-    http_server http_srv(cfg, main_pool, name, version);
+    http_server http_srv(cfg, main_pool, name, version, db_srv);
     if (!http_srv.run()) {
         log_msg(log_level::crit) << "Cannot initialize HTTP server";
-        return false;
-    }
-    // Set up the database pool
-    db_server db_srv(cfg.data().has_databases() ?
-                         &cfg.data().databases() : nullptr,
-                     database_pool);
-    if (!db_srv.run()) {
-        log_msg(log_level::crit) << "Cannot initialize database server";
         return false;
     }
     // Start processing

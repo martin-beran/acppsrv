@@ -13,6 +13,7 @@
 namespace acppsrv {
 
 class configuration;
+class db_server;
 class log_msg;
 class thread_pool;
 class http_handler;
@@ -36,7 +37,8 @@ public:
         boost::beast::http::response<boost::beast::http::empty_body>;
     static_assert(std::is_same_v<endpoint_type, acceptor_type::endpoint_type>);
     http_server(const configuration& cfg, thread_pool& workers,
-                std::string_view app_name, std::string_view app_version);
+                std::string_view app_name, std::string_view app_version,
+                db_server& db_srv);
     http_server(const http_server&) = delete;
     http_server(http_server&&) = delete;
     ~http_server() = default;

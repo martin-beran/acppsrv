@@ -7,8 +7,8 @@
 namespace acppsrv::sqlite {
 
 class connection;
-class transaction;
 class query;
+class eval;
 
 class connection {
 public:
@@ -19,6 +19,8 @@ public:
     ~connection();
     connection& operator=(const connection&) = delete;
     connection& operator=(connection&&) = delete;
+    // May be called from any thread
+    void interrupt();
 private:
     class impl;
     std::string _file;
@@ -41,6 +43,11 @@ private:
     std::string _sql;
     std::string _sql_id;
     std::unique_ptr<impl> _impl;
+};
+
+class eval {
+public:
+    eval(query& q);
 };
 
 class error: public std::runtime_error {

@@ -7,10 +7,22 @@
         },
         "control": {
             "threads": 1
+        },
+        "database": {
         }
     },
     "http_server": {
         "keepalive_requests": 100,
         "port": 8080
+    },
+    "databases": {
+        "sqlite3": {
+            "db1": {
+                "file": "db1.sqlite",
+                "queries": {
+                    "trivial": "select 1"
+                }
+            }
+        }
     }
 }

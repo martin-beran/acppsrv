@@ -82,38 +82,44 @@ std::optional<log_level> from_string(std::string_view str)
 
 /*** log_msg *****************************************************************/
 
-log_msg::log_msg(logger& obj, log_level level, session_type session):
+log_msg::log_msg(logger& obj, log_level level, session_type session) noexcept:
      _logger(obj), _level(level), _session(session)
 {
     namespace sc = std::chrono;
-    if (_level > log_level::off && _level <= _logger.level()) {
-        _os.emplace(std::cerr);
-        auto now = sc::system_clock::now().time_since_epoch();
-        std::array<char, 64> buf{};
-        time_t time = sc::duration_cast<sc::seconds>(now).count();
-        auto usec =
-            std::to_string(sc::duration_cast<sc::microseconds>(now).count() %
-                           1'000'000);
-        tm t{};
-        localtime_r(&time, &t);
-        assert(strftime(buf.data(), buf.size(), "%F %T.000000%z", &t) != 0);
-        static constexpr size_t time_end = 26; // after .000000
-        std::copy(usec.begin(), usec.end(),
-                  buf.data() + time_end - usec.size());
-        *this << buf.data();
-        *this << " [" << getpid() << '.' << std::this_thread::get_id();
-        for (auto&& s: session)
-            if (s)
-                *this << '.' << *s;
-        *this << ']';
-        *this << ' ' << to_string(_level) << ' ';
-    }
+    if (_level > log_level::off && _level <= _logger.level())
+        try {
+            _os.emplace(std::cerr);
+            auto now = sc::system_clock::now().time_since_epoch();
+            std::array<char, 64> buf{};
+            time_t time = sc::duration_cast<sc::seconds>(now).count();
+            auto usec =
+                std::to_string(sc::duration_cast<sc::microseconds>(now).count() %
+                               1'000'000);
+            tm t{};
+            localtime_r(&time, &t);
+            assert(strftime(buf.data(), buf.size(), "%F %T.000000%z", &t) != 0);
+            static constexpr size_t time_end = 26; // after .000000
+            std::copy(usec.begin(), usec.end(),
+                      buf.data() + time_end - usec.size());
+            *this << buf.data();
+            *this << " [" << getpid() << '.' << std::this_thread::get_id();
+            for (auto&& s: session)
+                if (s)
+                    *this << '.' << *s;
+            *this << ']';
+            *this << ' ' << to_string(_level) << ' ';
+        } catch (...) {
+            kill();
+        }
 }
 
 log_msg::~log_msg()
 {
     if (_os && _os->get_wrapped())
-        *_os << std::endl;
+        try {
+            *_os << std::endl;
+        } catch (...) {
+        }
 }
 
 /*** logger ******************************************************************/

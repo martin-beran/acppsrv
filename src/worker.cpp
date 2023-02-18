@@ -5,6 +5,8 @@
 
 namespace acppsrv {
 
+thread_local size_t thread_pool::this_thread_idx;
+
 thread_pool::thread_pool(const proto::ThreadPool* cfg, std::string name):
     ctx(configuration::num_threads(cfg)), name(std::move(name)),
     threads(size_t(configuration::num_threads(cfg)))
@@ -28,6 +30,7 @@ void thread_pool::run(bool persistent)
     for (size_t t = 0; t < threads.size(); ++t)
         threads[t] = std::thread(
             [this, t, num_threads = threads.size()]() {
+                this_thread_idx = t;
                 log_msg(log_level::debug) << "Starting thread " << (t + 1) <<
                     '/' << num_threads << " in pool \"" << name << '"';
                 while (!ctx.stopped())

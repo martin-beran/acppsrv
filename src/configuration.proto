@@ -46,8 +46,10 @@ message ThreadPool {
 message ThreadPools {
     // The main server client handling pool
     ThreadPool main = 1;
-    //! The administrative control pool
+    // The administrative control pool
     ThreadPool control = 2;
+    // The database handling pool
+    ThreadPool database = 3;
 }
 
 // HTTP server
@@ -62,10 +64,21 @@ message HttpServer {
     uint64 max_request_body = 8; // 0 = unlimited
 }
 
+// SQLite3 database
+message SQLite3Db {
+    string file = 1;
+    map<string, string> queries = 2;
+}
+
+message SQLite3 {
+    map<string, SQLite3Db> sqlite3 = 1;
+}
+
 /*** Top level configuration node ********************************************/
 
 message Configuration {
     Log log = 1;
     ThreadPools thread_pools = 2;
     HttpServer http_server = 3;
+    SQLite3 databases = 4;
 }

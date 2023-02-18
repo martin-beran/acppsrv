@@ -26,9 +26,17 @@ public:
     void run(bool persistent);
     void stop();
     void wait();
+    size_t size() {
+        return threads.size();
+    }
+    // To be called from a handler running in this thread pool
+    [[nodiscard]] static size_t this_thread() {
+        return this_thread_idx;
+    }
     boost::asio::io_context ctx;
 private:
     const std::string name;
+    static thread_local size_t this_thread_idx;
     std::vector<std::thread> threads;
     boost::asio::executor_work_guard<boost::asio::io_context::executor_type>
         work{ctx.get_executor()};

@@ -7,18 +7,23 @@ protobuf_generate_cpp(
 message("Protobuf generated headers: ${PROTO_HPP}")
 message("Protobuf generated sources: ${PROTO_CPP}")
 
+add_library(proto_obj OBJECT ${PROTO_CPP})
+target_compile_options(proto_obj PRIVATE -Wno-sign-conversion)
+
 # The main ACppSrv executable
 add_executable(
     acppsrv
     acppsrv.cpp
     application.cpp
     configuration.cpp
+    db_server.cpp
     http_server.cpp
     http_hnd_echo.cpp
     http_hnd_stat.cpp
     log.cpp
+    sqlite3.cpp
     worker.cpp
-    ${PROTO_CPP}
+    $<TARGET_OBJECTS:proto_obj>
 )
 target_include_directories(acppsrv PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 target_link_libraries(

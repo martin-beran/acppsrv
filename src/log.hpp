@@ -33,19 +33,25 @@ enum class log_level: int {
 
 [[nodiscard]] std::optional<log_level> from_string(std::string_view str);
 
+// It may be called in destructor, so member functions are generally noexcept
+// and exceptions are silently ignored
 class log_msg {
 public:
     using session_type = std::array<std::optional<uint64_t>, 2>;
-    explicit log_msg(log_level level, session_type session = {});
-    log_msg(logger& obj, log_level level, session_type = {});
+    explicit log_msg(log_level level, session_type session = {}) noexcept;
+    log_msg(logger& obj, log_level level, session_type = {}) noexcept;
     log_msg(const log_msg&) = delete;
-    log_msg(log_msg&&) = default;
+    log_msg(log_msg&&) noexcept = default;
     ~log_msg();
     log_msg& operator=(const log_msg&) = delete;
     log_msg& operator=(log_msg&&) = delete;
-    template <class T> log_msg& operator<<(T&& v) & {
+    template <class T> log_msg& operator<<(T&& v) & noexcept {
         if (_os)
-            *_os << v;
+            try {
+                *_os << v;
+            } catch (...) {
+                kill();
+            }
         return *this;
     }
     template <class ...T> log_msg& operator<<(std::variant<T...>&& v) & {
@@ -60,6 +66,9 @@ public:
         return std::move(*this);
     }
 private:
+    void kill() {
+        _os.reset();
+    }
     logger& _logger;
     log_level _level;
     std::optional<std::osyncstream> _os;
@@ -92,7 +101,7 @@ private:
 
 /*** log_msg *****************************************************************/
 
-inline log_msg::log_msg(log_level level, session_type session):
+inline log_msg::log_msg(log_level level, session_type session) noexcept:
     log_msg(logger::global(), level, session)
 {
 }

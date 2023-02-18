@@ -37,8 +37,7 @@ configuration::configuration(const std::filesystem::path& cfg_file)
     if (auto status = gpb::util::JsonStringToMessage(isb.str(), &_cfg, opts);
         !status.ok())
     {
-        log_err(cfg_file) << "(" << status.error_code() << ") " <<
-            status.error_message();
+        log_err(cfg_file) << status.ToString();
         return;
     }
     // Validate configuration

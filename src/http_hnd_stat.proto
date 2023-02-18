@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package acppsrv.http_hnd.proto.stat;
+
+message Request {
+    bool reset = 1;
+}
+
+message Response {
+    uint64 connections = 1;
+    uint64 requests = 2;
+    uint64 data_req = 3;
+    uint64 data_resp = 4;
+}

@@ -52,7 +52,7 @@ endif()
 # Version from Git
 message(CHECK_START "Getting version by Git")
 execute_process(
-    COMMAND git describe --always
+    COMMAND git describe --always --dirty
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     OUTPUT_VARIABLE GIT_DESCRIBE OUTPUT_STRIP_TRAILING_WHITESPACE
 )
@@ -74,6 +74,7 @@ add_compile_options(
     -Wswitch-default -Wswitch-enum
     -Wno-mismatched-new-delete
 )
+add_compile_definitions(GIT_VERSION="${GIT_DESCRIBE}")
 if (USE_LIBC++)
     add_compile_options(-stdlib=libc++)
     add_link_options(-stdlib=libc++)

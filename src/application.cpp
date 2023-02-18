@@ -40,7 +40,7 @@ bool application::run()
             main_pool.stop();
         });
     // Set up the main pool
-    http_server http_srv(cfg, main_pool);
+    http_server http_srv(cfg, main_pool, name, version);
     if (!http_srv.run()) {
         log_msg(log_level::crit) << "Cannot initialize HTTP server";
         return false;

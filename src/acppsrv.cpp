@@ -40,7 +40,8 @@ int main(int argc, char* argv[])
     try {
         {
             // Process command line
-            log_msg(log_level::notice) << "Starting";
+            log_msg(log_level::notice) << "Starting " << application::name <<
+                " version " << application::version;
             if (argc != 2) {
                 usage(argv[0]);
                 goto finish;

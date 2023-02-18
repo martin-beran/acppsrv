@@ -3,7 +3,17 @@
 #include "finally.hpp"
 #include "worker.hpp"
 
+#include "http_hnd_echo.hpp"
+#include "http_hnd_stat.hpp"
+
+#include <algorithm>
 #include <boost/asio.hpp>
+#include <boost/asio/redirect_error.hpp>
+#include <boost/beast/core/string.hpp>
+#include <boost/beast/http/field.hpp>
+#include <boost/beast/http/status.hpp>
+#include <boost/beast/http/verb.hpp>
+#include <boost/system/detail/error_code.hpp>
 #include <exception>
 #include <optional>
 
@@ -52,7 +62,10 @@ auto http_server::conn_limit(CompletionToken&& token)
 
 /*** http_server *************************************************************/
 
-http_server::http_server(const configuration& cfg, thread_pool& workers):
+http_server::http_server(const configuration& cfg, thread_pool& workers,
+                         std::string_view app_name,
+                         std::string_view app_version):
+    header_server(std::string(app_name) + "/" + std::string(app_version)),
     port(cfg.http_port()), workers(workers), acceptor(workers.ctx)
 {
     if (cfg.data().has_http_server()) {
@@ -76,6 +89,11 @@ http_server::http_server(const configuration& cfg, thread_pool& workers):
         if (auto v = http.max_request_body())
             max_request_body = v;
     }
+    // Initialize handlers
+    handlers["/echo"] = std::make_unique<http_hnd::echo>();
+    auto p_stat = std::make_unique<http_hnd::stat>();
+    stat = p_stat.get();
+    handlers["/stat"] = std::move(p_stat);
 }
 
 boost::asio::awaitable<void> http_server::accept_loop()
@@ -85,7 +103,7 @@ boost::asio::awaitable<void> http_server::accept_loop()
             co_await std::move(*cl);
         log_msg(log_level::debug) <<
             "Waiting for connection active_connections=" <<
-            active_connections << " maximum=" << log_limit(max_connections);
+            active_connections << '/' << log_limit(max_connections);
         auto [ec, conn] = co_await acceptor.async_accept(
                              boost::asio::make_strand(acceptor.get_executor()),
                              boost::asio::as_tuple(boost::asio::use_awaitable));
@@ -112,7 +130,8 @@ boost::asio::awaitable<void> http_server::accept_loop()
 }
 
 template <class Endpoint>
-void http_server::active_connection_end(const Endpoint& client, uint64_t sid,
+void http_server::active_connection_end(const Endpoint& client,
+                                        uint64_t sid, uint64_t requests,
                                         const boost::system::error_code& ec,
                                         std::string_view stage)
 {
@@ -127,8 +146,9 @@ void http_server::active_connection_end(const Endpoint& client, uint64_t sid,
     }
     lck.unlock();
     auto msg = log_msg(ec ? log_level::err : log_level::info, {sid}) <<
-        "Finished handling connection client=" << client << " active=" << ac <<
-        " maximum=" << log_limit(max_connections);
+        "Finished handling connection client=" << client <<
+        " active_connections=" << ac << '/' << log_limit(max_connections) <<
+        " requests=" << requests;
     if (ec)
         msg << " stage=" << stage << " error=" << ec.message();
 }
@@ -153,75 +173,126 @@ boost::asio::awaitable<void>
 http_server::handle_connection(socket_type conn, endpoint_type client,
                                uint64_t sid)
 {
+    // This is one long coroutine, because splitting it into several smaller
+    // coroutines would require allocating many coroutine states.
+    // Prepare for final logging and tracking active connections
     boost::system::error_code ec;
+    uint64_t req_n = 0U;
     std::string_view stage = {};
-    util::finally at_end([this, &client, sid, &ec, &stage]() {
-        active_connection_end(client, sid, ec, stage);
+    util::finally at_end([this, &client, sid, &req_n, &ec, &stage]() {
+        active_connection_end(client, sid, req_n, ec, stage);
     });
+    // Process requests from the connection
+    ++stat->data.connections;
     log_msg(log_level::debug, {sid}) << "Waiting for data from client";
     boost::beast::tcp_stream stream(std::move(conn));
     boost::beast::flat_buffer buffer;
-    for (auto [req_n, close] = std::pair{uint64_t{1}, false};
-         !close && (!keepalive_requests || req_n - 1U < *keepalive_requests);
-         ++ req_n)
+    for (bool keepalive = true; keepalive;)
     {
+        // Read request headers
         stage = ""sv;
-        log_msg(log_level::debug, {sid, req_n}) << "Waiting for request " <<
-            req_n << '/' << log_limit(keepalive_requests);
+        log_msg(log_level::debug, {sid, req_n + 1}) << "Waiting for request " <<
+            (req_n + 1) << '/' << log_limit(keepalive_requests);
         boost::beast::http::request_parser<http_body_type> parser;
         if (max_request_headers)
             parser.header_limit(*max_request_headers);
         if (max_request_body)
             parser.body_limit(*max_request_body);
-        before_request_timeout(stream, req_n == 1);
+        before_request_timeout(stream, req_n == 0);
         co_await boost::beast::http::async_read_header(
             stream, buffer, parser,
             boost::asio::redirect_error(boost::asio::use_awaitable, ec));
-        stage = "read_request_headers";
+        stage = "read_request_headers"sv;
         if (ec)
             goto abort_connection;
         http_request_type& request = parser.get();
-        log_msg(log_level::info, {sid, req_n}) << "Request headers" <<
+        ++req_n;
+        ++stat->data.requests;
+        log_msg(log_level::debug, {sid, req_n}) << "Request headers" <<
             " method=" << request.method_string() <<
             " uri=" << request.target() <<
             " version=" << request.version() / 10 << '.' <<
             request.version() % 10;
+        // Handle 100-continue
+        if (boost::beast::iequals(request[boost::beast::http::field::expect],
+                                  "100-continue"sv))
+        {
+            empty_response_type response;
+            response.version(11);
+            response.result(boost::beast::http::status::continue_);
+            response.set(boost::beast::http::field::server, header_server);
+            in_request_timeout(stream);
+            co_await boost::beast::http::async_write(stream, response,
+                boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+            stage = "write_100_continue"sv;
+            if (ec)
+                goto abort_connection;
+        }
+        // Read request body
+        while (!parser.is_done()) {
+            in_request_timeout(stream);
+            co_await boost::beast::http::async_read_some(
+                stream, buffer, parser,
+                boost::asio::redirect_error(boost::asio::use_awaitable, ec));
+            stage = "read_request_body"sv;
+            if (ec)
+                goto abort_connection;
+        }
+        log_msg(log_level::debug, {sid, req_n}) <<
+            "Request body content_length=" << request.body().size();
+        stat->data.data_req += request.body().size();
         // Create a response
-        http_response_type response = co_await handle_request(request, sid,
-                                                              req_n);
-        if (!response.keep_alive())
-            close = true;
+        auto handler = handlers.find(request.target());
+        http_response_type response = handler == handlers.end() ?
+            http_handler::error_response(sid, req_n,
+                                     boost::beast::http::status::bad_request,
+                                     "Unknown URI path") :
+            handler->second->async() ?
+                co_await handler->second->handle_async(request, sid, req_n) :
+                handler->second->handle_sync(request, sid, req_n);
+        response.prepare_payload();
+        if (request.method() == boost::beast::http::verb::head)
+            response.body().clear();
+        stat->data.data_resp += response.body().size();
+        response.set(boost::beast::http::field::server, header_server);
+        keepalive = request.keep_alive() &&
+            (!keepalive_requests || req_n <= *keepalive_requests);
+        response.keep_alive(keepalive);
         // Send the response
         stream.expires_never();
         co_await boost::beast::http::async_write(
             stream, response,
             boost::asio::redirect_error(boost::asio::use_awaitable, ec));
-        stage = "write_response";
+        stage = "write_response"sv;
         if (ec)
             goto abort_connection;
-        auto msg = log_msg(log_level::info, {sid, req_n}) <<
-            "Request " << req_n << '/' <<
+        log_msg(log_level::info, {sid, req_n}) <<
+            "Request finished " << req_n << '/' <<
             log_limit(keepalive_requests) <<
-            " finished method=" << request.method_string() <<
+            " client=" << client <<
+            " method=" << request.method_string() <<
             " uri=" << request.target() <<
-            " status=" << response.result_int();
-        if (auto size = response.payload_size())
-            msg << " content_length=" << *size;
+            " status=" << response.result_int() <<
+            " request_body=" << request.payload_size().value_or(0) <<
+            " response_body=" << response.payload_size().value_or(0);
     }
     ec = {};
     stage = ""sv;
 abort_connection:
+    // Send error response for selected errors
+    if (ec == boost::beast::http::error::body_limit) {
+        http_response_type
+            response{boost::beast::http::status::payload_too_large, 11};
+        in_request_timeout(stream);
+        boost::system::error_code ece;
+        co_await boost::beast::http::async_write(
+            stream, response,
+            boost::asio::redirect_error(boost::asio::use_awaitable, ece));
+        if (ece)
+            log_msg(log_level::err, {sid}) <<
+                "Failed sending error message: " << ec.message();
+    }
     co_return;
-}
-
-boost::asio::awaitable<http_server::http_response_type>
-http_server::handle_request(const http_request_type& request, uint64_t sid,
-                            uint64_t req_n)
-{
-    http_response_type response;
-    response.keep_alive(request.keep_alive());
-    DEBUG({sid, req_n}) << "Generating response";
-    co_return response;
 }
 
 void http_server::in_request_timeout(boost::beast::tcp_stream& stream)
@@ -276,6 +347,75 @@ bool http_server::run()
     boost::asio::co_spawn(acceptor.get_executor(), accept_loop(),
                           co_spawn_handler);
     return true;
+}
+
+/*** http_handler ************************************************************/
+
+http_server::http_response_type
+http_handler::error_response(uint64_t sid, uint64_t req_n,
+                             boost::beast::http::status status,
+                             std::string msg)
+{
+    log_msg(log_level::debug, {sid, req_n}) <<
+        "Returning error response status=" << unsigned(status);
+    http_response_type response{status, 11};
+    response.set(boost::beast::http::field::content_type, "text/plain");
+    response.body() = std::move(msg);
+    response.body() += '\n';
+    return response;
+}
+
+boost::asio::awaitable<http_server::http_response_type>
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-reference-coroutine-parameters)
+http_handler::handle_async(const http_request_type& request,
+                           uint64_t sid, uint64_t req_n)
+{
+    co_return handle_sync(request, sid, req_n);
+}
+
+http_server::http_response_type
+http_handler::handle_sync(const http_request_type&, uint64_t, uint64_t)
+{
+    http_response_type response{boost::beast::http::status::ok, 11};
+    return response;
+}
+
+std::pair<bool, std::string_view>
+http_handler::json_body(const http_request_type& request, bool is_req)
+{
+    std::string_view ct{};
+    if (!is_req) {
+        ct = request[boost::beast::http::field::accept];
+        if (ct == "*"sv || ct == "*/*"sv)
+            ct = {};
+    }
+    if (ct.empty())
+        ct = request[boost::beast::http::field::content_type];
+    return {
+        std::find_if(content_type_json.begin(), content_type_json.end(),
+            [ct](auto&& v) {
+                return boost::beast::iequals(ct, v);
+            }) != content_type_json.end(),
+        ct
+    };
+}
+
+std::pair<bool, std::string_view>
+http_handler::protobuf_body(const http_request_type& request, bool is_req)
+{
+    std::string_view ct{};
+    if (!is_req)
+        ct = request[boost::beast::http::field::accept];
+    if (ct.empty())
+        ct = request[boost::beast::http::field::content_type];
+    return {
+        std::find_if(content_type_protobuf.begin(),
+            content_type_protobuf.end(),
+            [ct](auto&& v) {
+                return boost::beast::iequals(ct, v);
+            }) != content_type_protobuf.end(),
+        ct
+    };
 }
 
 } // namespace acppsrv

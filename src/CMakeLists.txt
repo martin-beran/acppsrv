@@ -1,5 +1,9 @@
 # Protobuf files
-protobuf_generate_cpp(PROTO_CPP PROTO_HPP configuration.proto)
+protobuf_generate_cpp(
+    PROTO_CPP PROTO_HPP
+    configuration.proto
+    http_hnd_stat.proto
+)
 message("Protobuf generated headers: ${PROTO_HPP}")
 message("Protobuf generated sources: ${PROTO_CPP}")
 
@@ -10,6 +14,8 @@ add_executable(
     application.cpp
     configuration.cpp
     http_server.cpp
+    http_hnd_echo.cpp
+    http_hnd_stat.cpp
     log.cpp
     worker.cpp
     ${PROTO_CPP}

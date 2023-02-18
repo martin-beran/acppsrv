@@ -10,7 +10,6 @@
         }
     },
     "http_server": {
-        "port": 8080,
-        "max_connections": 1
+        "port": 8080
     }
 }

@@ -4,6 +4,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string_view>
+#include <variant>
 
 namespace acppsrv::sqlite {
 
@@ -32,6 +33,20 @@ private:
 
 class query {
 public:
+    enum class column_type: int {
+        ct_null = 0,
+        ct_int64 = 1,
+        ct_double = 2,
+        ct_string = 3,
+        ct_blob = 4,
+    };
+    using column_value = std::variant<
+        std::nullptr_t,
+        int64_t,
+        double,
+        std::string,
+        std::string
+    >;
     explicit query(connection& db, std::string sql, std::string sql_id = {});
     query(const query&) = delete;
     query(query&&) = delete;
@@ -44,6 +59,9 @@ public:
     void bind(int i, double v);
     void bind(int i, const std::string& v);
     void bind_blob(int i, const std::string& v);
+    int column_count();
+    bool next_row();
+    column_value get_column(int i);
 private:
     class impl;
     connection& _db;

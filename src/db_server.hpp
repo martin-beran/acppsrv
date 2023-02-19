@@ -42,6 +42,8 @@ private:
         run_query(http_hnd::proto::db::Request& request);
     static void bind(sqlite::query& q, int i,
                      const http_hnd::proto::db::Value& v);
+    static void execute_query(sqlite::query& q,
+                              http_hnd::proto::db::Response& response);
     const proto::SQLite3* cfg;
     thread_pool& workers;
     std::vector<std::map<std::string, db_def_t>> databases;

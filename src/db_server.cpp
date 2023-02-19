@@ -37,6 +37,38 @@ void db_server::bind(sqlite::query& q, int i,
     }
 }
 
+void db_server::execute_query(sqlite::query& q,
+                              http_hnd::proto::db::Response& response)
+{
+    int columns = q.column_count();
+    while (q.next_row()) {
+        auto row = response.add_rows();
+        using ct = sqlite::query::column_type;
+        for (int c = 0; c < columns; ++c) {
+            auto val = q.get_column(c);
+            auto col = row->add_columns();
+            switch (static_cast<ct>(val.index())) {
+            case ct::ct_null:
+            default:
+                col->set_v_null(http_hnd::proto::db::Null::NULL_);
+                break;
+            case ct::ct_int64:
+                col->set_v_int64(std::get<int64_t>(val));
+                break;
+            case ct::ct_double:
+                col->set_v_double(std::get<double>(val));
+                break;
+            case ct::ct_string:
+                col->set_v_text(std::get<int(ct::ct_string)>(val));
+                break;
+            case ct::ct_blob:
+                col->set_v_blob(std::get<int(ct::ct_blob)>(val));
+                break;
+            }
+        }
+    }
+}
+
 void db_server::interrupt()
 {
     for (size_t tidx = 1; auto&& db_map: databases) {
@@ -112,12 +144,11 @@ db_server::run_query(http_hnd::proto::db::Request& request)
         db_q.start();
         for (int i = 0; i < request.args_size(); ++i)
             bind(db_q, i, request.args(i));
-        DEBUG() << "Running database=\"" << request.db() <<
-            "\" query=\"" << request.query() << '"' <<
-            " thread=" << thread_pool::this_thread() << '/' << workers.size();
-            response.set_ok(true);
-            response.set_msg("ok");
+        execute_query(db_q, response);
+        response.set_ok(true);
+        response.set_msg("ok");
     } catch (sqlite::error& e) {
+        response.clear_rows();
         response.set_ok(false);
         response.set_msg(e.what());
     }

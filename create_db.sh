@@ -6,5 +6,6 @@ if [ $# != 1 ]; then
 fi
 
 sqlite3 "$1" <<EOF
+pragma journal_mode = WAL;
 create table data (key primary key, value);
 EOF

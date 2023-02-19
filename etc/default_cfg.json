@@ -17,10 +17,15 @@
     },
     "databases": {
         "sqlite3": {
-            "db1": {
-                "file": "db1.sqlite",
+            "key_value": {
+                "file": "key_value.sqlite",
                 "queries": {
-                    "trivial": "select 1"
+                    "size": "select count() from data",
+                    "get": "select value from data where key = ?1",
+                    "set": "insert into data values (?1, ?2)",
+                    "list": "select key, value from data order by key",
+                    "erase": "delete from data where key = ?1",
+                    "clear": "delete from data"
                 }
             }
         }

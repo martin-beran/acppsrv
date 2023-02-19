@@ -1,6 +1,6 @@
 BSD 2-Clause License
 
-Copyright (c) 2022, Martin Beran
+Copyright (c) 2023, Martin Beran
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without

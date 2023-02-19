@@ -31,8 +31,8 @@ connection::impl::impl(connection& conn): conn(conn)
         status != SQLITE_OK)
     {
         if (!db)
-            throw error(conn._file);
-        throw error(conn, *this);
+            throw error("sqlite3_open_v2", conn._file);
+        throw error("sqlite3_open_v2", conn, *this);
     }
     assert(db);
 }
@@ -75,8 +75,7 @@ public:
     ~impl();
     impl& operator=(const impl&) = delete;
     impl& operator=(impl&&) = delete;
-private:
-    query& q;
+    [[maybe_unused]] query& q;
     sqlite3_stmt* stmt = nullptr;
 };
 
@@ -89,8 +88,7 @@ query::impl::impl(query& q): q(q)
                            nullptr) != SQLITE_OK)
     {
         assert(!stmt);
-        // this->q to silence compiler warning about unused q
-        throw error(this->q._db, this->q._sql_id);
+        throw error("sqlite3_prepare_v3", q._db, q._sql_id);
     }
     assert(stmt);
 }
@@ -110,25 +108,72 @@ query::query(connection& db, std::string sql, std::string sql_id):
 
 query::~query() = default;
 
+void query::bind(int i, std::nullptr_t)
+{
+    if (sqlite3_bind_null(_impl->stmt, i) != SQLITE_OK)
+        throw error("sqlite3_bind_null", _db, _sql_id);
+}
+
+void query::bind(int i, int64_t v)
+{
+    if (sqlite3_bind_int64(_impl->stmt, i, v) != SQLITE_OK)
+        throw error("sqlite3_bind_int64", _db, _sql_id);
+}
+
+void query::bind(int i, double v)
+{
+    if (sqlite3_bind_double(_impl->stmt, i, v) != SQLITE_OK)
+        throw error("sqlite3_bind_double", _db, _sql_id);
+}
+
+void query::bind(int i, const std::string& v)
+{
+    if (sqlite3_bind_text(_impl->stmt, i, v.c_str(), int(v.size()),
+                          SQLITE_STATIC) != SQLITE_OK)
+    {
+        throw error("sqlite3_bind_text", _db, _sql_id);
+    }
+}
+
+void query::bind_blob(int i, const std::string& v)
+{
+    if (sqlite3_bind_blob(_impl->stmt, i, v.c_str(), int(v.size()),
+                          SQLITE_STATIC) != SQLITE_OK)
+    {
+        throw error("sqlite3_bind_blob", _db, _sql_id);
+    }
+}
+
+void query::start()
+{
+    if (sqlite3_reset(_impl->stmt) != SQLITE_OK)
+        throw error("sqlite3_reset", _db, _sql_id);
+    if (sqlite3_clear_bindings(_impl->stmt) != SQLITE_OK)
+        throw error("sqlite3_clear_bindings", _db, _sql_id);
+}
+
 /*** error *******************************************************************/
 
-error::error(const std::string& file):
+error::error(std::string_view fun, const std::string& file):
     runtime_error("sqlite3 error in db \"" + file + "\"" +
                   ": Cannot allocate database handle")
 {
+    log_msg(log_level::debug) << "Failed call " << fun << "()";
 }
 
-error::error(connection& db, const std::string& sql_id):
+error::error(std::string_view fun, connection& db, const std::string& sql_id):
         runtime_error("sqlite3 error in db \"" + db._file + "\"" +
                       (sql_id.empty() ? "" : (" (" + sql_id + ")")) +
                       ": " + sqlite3_errmsg(db._impl->db))
 {
+    log_msg(log_level::debug) << "Failed call " << fun << "()";
 }
 
-error::error(connection& db, connection::impl& impl):
+error::error(std::string_view fun, connection& db, connection::impl& impl):
         runtime_error("sqlite3 error in db \"" + db._file + "\"" +
                       ": " + sqlite3_errmsg(impl.db))
 {
+    log_msg(log_level::debug) << "Failed call " << fun << "()";
 }
 
 } // namespace acppsrv::sqlite

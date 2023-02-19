@@ -39,6 +39,8 @@ db::handle_async(const http_request_type& request, uint64_t sid, uint64_t req_n)
     auto executor = co_await boost::asio::this_coro::executor;
     proto::db::Response out = co_await call_query(executor, std::move(*in),
                                                   boost::asio::use_awaitable);
+    if (!out.ok())
+        log_msg(log_level::err) << "Database query failed: " << out.msg();
     serialize(request, sid, req_n, out, response);
     co_return response;
 }

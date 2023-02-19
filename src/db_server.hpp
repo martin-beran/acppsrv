@@ -17,6 +17,7 @@ class SQLite3;
 
 namespace http_hnd::proto::db {
 
+class Value;
 class Request;
 class Response;
 
@@ -39,6 +40,8 @@ private:
     };
     http_hnd::proto::db::Response
         run_query(http_hnd::proto::db::Request& request);
+    static void bind(sqlite::query& q, int i,
+                     const http_hnd::proto::db::Value& v);
     const proto::SQLite3* cfg;
     thread_pool& workers;
     std::vector<std::map<std::string, db_def_t>> databases;

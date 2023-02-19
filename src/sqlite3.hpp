@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string_view>
 
@@ -37,6 +38,12 @@ public:
     ~query();
     query& operator=(const query&) = delete;
     query& operator=(query&&) = delete;
+    void start();
+    void bind(int i, std::nullptr_t v);
+    void bind(int i, int64_t v);
+    void bind(int i, double v);
+    void bind(int i, const std::string& v);
+    void bind_blob(int i, const std::string& v);
 private:
     class impl;
     connection& _db;
@@ -52,10 +59,11 @@ public:
 
 class error: public std::runtime_error {
 public:
-    explicit error(const std::string& file);
-    explicit error(connection& db, const std::string& sql_id = {});
+    explicit error(std::string_view fun, const std::string& file);
+    explicit error(std::string_view fun, connection& db,
+                   const std::string& sql_id = {});
     // To be used before db._impl is initialized
-    error(connection& db, connection::impl& impl);
+    error(std::string_view fun, connection& db, connection::impl& impl);
 };
 
 } // namespace acppsrv::sqlite

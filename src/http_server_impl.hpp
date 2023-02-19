@@ -64,8 +64,11 @@ bool http_handler::serialize(const http_request_type& request, uint64_t sid,
     namespace gpb = google::protobuf;
     Response serialized;
     if (auto [json, ct] = json_body(request, false); json) {
+        gpb::util::JsonPrintOptions opts{};
+        opts.always_print_primitive_fields = true;
         if (auto status = gpb::util::MessageToJsonString(data,
-                                                         &response.body());
+                                                         &response.body(),
+                                                         opts);
             !status.ok())
         {
             std::string msg = "Cannot serialize response to JSON: ("s +

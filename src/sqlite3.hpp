@@ -40,6 +40,11 @@ public:
         ct_string = 3,
         ct_blob = 4,
     };
+    enum class status {
+        row,
+        done,
+        locked,
+    };
     using column_value = std::variant<
         std::nullptr_t,
         int64_t,
@@ -53,14 +58,14 @@ public:
     ~query();
     query& operator=(const query&) = delete;
     query& operator=(query&&) = delete;
-    void start();
+    void start(bool restart);
     void bind(int i, std::nullptr_t v);
     void bind(int i, int64_t v);
     void bind(int i, double v);
     void bind(int i, const std::string& v);
     void bind_blob(int i, const std::string& v);
     int column_count();
-    bool next_row();
+    status next_row(uint32_t retries);
     column_value get_column(int i);
 private:
     class impl;

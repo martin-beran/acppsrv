@@ -68,6 +68,8 @@ message HttpServer {
 message SQLite3Db {
     string file = 1;
     map<string, string> queries = 2;
+    uint32 retries = 3; // 0 = disabled
+    float retry_wait = 4; // 0 = retry immediately
 }
 
 message SQLite3 {

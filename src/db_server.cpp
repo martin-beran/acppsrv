@@ -1,8 +1,11 @@
 #include "db_server.hpp"
 #include "configuration.hpp"
+#include "finally.hpp"
 #include "http_hnd_db.pb.h"
 #include "log.hpp"
 #include "worker.hpp"
+#include <chrono>
+#include <mutex>
 #include <tuple>
 #include <utility>
 
@@ -37,11 +40,32 @@ void db_server::bind(sqlite::query& q, int i,
     }
 }
 
-void db_server::execute_query(sqlite::query& q,
+void db_server::execute_query(const db_def_t& db, sqlite::query& q,
+                              uint32_t retries,
                               http_hnd::proto::db::Response& response)
 {
     int columns = q.column_count();
-    while (q.next_row()) {
+    util::finally signal_finished([&db]() noexcept {
+        std::lock_guard lck(db.sync->mtx);
+        db.sync->finished = true;
+        db.sync->cond.notify_one();
+    });
+    for (;;) {
+        auto res = q.next_row(retries);
+        if (res == sqlite::query::status::done)
+            break;
+        if (res == sqlite::query::status::locked) {
+            assert(retries > 0);
+            --retries;
+            if (db.retry_wait > std::chrono::seconds{}) {
+                std::unique_lock lck(db.sync->mtx);
+                db.sync->cond.wait_for(lck, db.retry_wait,
+                                       [&db]() { return db.sync->finished; });
+                db.sync->finished = false;
+            }
+            q.start(true);
+            continue;
+        }
         auto row = response.add_rows();
         using ct = sqlite::query::column_type;
         for (int c = 0; c < columns; ++c) {
@@ -107,6 +131,14 @@ bool db_server::run()
                                                                      q_def,
                                                                      q_name));
                     }
+                    db.retries = d_def.retries();
+                    if (auto t = configuration::get_time(d_def.retry_wait()))
+                        db.retry_wait = *t < max_retry_wait ?
+                            *t : max_retry_wait;
+                    if (tidx == 0)
+                        db.sync = std::make_shared<db_sync_t>();
+                    else
+                        db.sync = databases[0].at(d_name).sync;
                 }
             }
         }
@@ -141,10 +173,12 @@ db_server::run_query(http_hnd::proto::db::Request& request)
         }
         //auto& db_c = db->second.db;
         auto& db_q = query->second;
-        db_q.start();
+        db_q.start(false);
         for (int i = 0; i < request.args_size(); ++i)
             bind(db_q, i, request.args(i));
-        execute_query(db_q, response);
+        execute_query(db->second, db_q,
+                      request.retry_if_locked() ? db->second.retries : 0,
+                      response);
         response.set_ok(true);
         response.set_msg("ok");
     } catch (sqlite::error& e) {

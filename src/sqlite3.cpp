@@ -173,23 +173,30 @@ query::column_value query::get_column(int i)
     }
 }
 
-bool query::next_row()
+query::status query::next_row(uint32_t retries)
 {
     switch (auto status = sqlite3_step(_impl->stmt)) {
     case SQLITE_DONE:
-        return false;
+        return status::done;
     case SQLITE_ROW:
-        return true;
+        return status::row;
+    case SQLITE_BUSY:
+        if (retries > 0) {
+            log_msg(log_level::debug) << "Database \"" + _db._file +
+                "\" locked in query \"" + _sql_id + "\" retries=" << retries;
+            return status::locked;
+        }
+        [[fallthrough]];
     default:
         throw error("sqlite3_step", _db, _sql_id);
     }
 }
 
-void query::start()
+void query::start(bool restart)
 {
-    if (sqlite3_reset(_impl->stmt) != SQLITE_OK)
+    if (sqlite3_reset(_impl->stmt) != SQLITE_OK && !restart)
         throw error("sqlite3_reset", _db, _sql_id);
-    if (sqlite3_clear_bindings(_impl->stmt) != SQLITE_OK)
+    if (!restart && sqlite3_clear_bindings(_impl->stmt) != SQLITE_OK)
         throw error("sqlite3_clear_bindings", _db, _sql_id);
 }
 

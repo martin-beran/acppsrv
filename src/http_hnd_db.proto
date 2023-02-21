@@ -24,6 +24,7 @@ message Request {
     string db = 1;
     string query = 2;
     repeated Value args = 3;
+    bool retry_if_locked = 4;
 }
 
 message Response {

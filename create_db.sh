@@ -6,6 +6,7 @@ if [ $# != 1 ]; then
 fi
 
 sqlite3 "$1" <<EOF
+pragma page_size = 4096;
 pragma journal_mode = WAL;
 create table data (key primary key, value);
 EOF

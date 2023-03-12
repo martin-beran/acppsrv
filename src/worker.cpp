@@ -27,7 +27,7 @@ void thread_pool::run(bool persistent)
     assert(!threads.front().joinable()); // not already started
     if (!persistent)
         work.reset();
-    for (size_t t = 0; t < threads.size(); ++t)
+    for (size_t t = 0; t < threads.size(); ++t) {
         threads[t] = std::thread(
             [this, t, num_threads = threads.size()]() {
                 this_thread_idx = t;
@@ -48,6 +48,15 @@ void thread_pool::run(bool persistent)
                 log_msg(log_level::debug) << "Stopped thread " << (t + 1) <<
                     '/' << num_threads << " in pool \"" << name << '"';
             });
+        std::string tname(16, '\0');
+        pthread_getname_np(threads[t].native_handle(), tname.data(),
+                           tname.size() + 1);
+        tname.resize(tname.find('\0'));
+        tname += "." + name;
+        if (tname.size() > 15)
+            tname.resize(15);
+        pthread_setname_np(threads[t].native_handle(), tname.c_str());
+    }
     log_msg(log_level::notice) << "Thread pool \"" << name <<
         "\" started with " << threads.size() << " threads";
 }

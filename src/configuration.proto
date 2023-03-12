@@ -50,6 +50,10 @@ message ThreadPools {
     ThreadPool control = 2;
     // The database handling pool
     ThreadPool database = 3;
+    // The number of main pools < 1 => 1
+    int32 main_pools = 4;
+    // If main_pools > 1, reserve one pool just for accepting new connections
+    bool accept_pool = 5;
 }
 
 // HTTP server

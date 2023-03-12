@@ -74,6 +74,14 @@ log_msg configuration::log_err(const std::filesystem::path& cfg_file)
         cfg_file << ": ";
 }
 
+int configuration::main_pools() const
+{
+    if (data().has_thread_pools())
+        return std::max(1, data().thread_pools().main_pools());
+    else
+        return 1;
+}
+
 int configuration::num_threads(const proto::ThreadPool* cfg)
 {
     static_assert(std::is_same_v<

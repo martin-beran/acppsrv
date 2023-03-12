@@ -63,13 +63,20 @@ auto http_server::conn_limit(CompletionToken&& token)
 
 /*** http_server *************************************************************/
 
-http_server::http_server(const configuration& cfg, thread_pool& workers,
+http_server::http_server(const configuration& cfg,
+                         thread_pools_t& workers,
                          std::string_view app_name,
                          std::string_view app_version,
                          db_server& db_srv):
     header_server(std::string(app_name) + "/" + std::string(app_version)),
-    port(cfg.http_port()), workers(workers), acceptor(workers.ctx)
+    port(cfg.http_port()), workers(workers), use_workers(workers.size()),
+    acceptor(workers.back()->ctx)
 {
+    if (use_workers > 1 && cfg.data().has_thread_pools() &&
+        cfg.data().thread_pools().accept_pool())
+    {
+        --use_workers;
+    }
     if (cfg.data().has_http_server()) {
         auto&& http = cfg.data().http_server();
         if (auto v = http.listen_queue(); v != 0) {
@@ -101,14 +108,14 @@ http_server::http_server(const configuration& cfg, thread_pool& workers,
 
 boost::asio::awaitable<void> http_server::accept_loop()
 {
-    for (;;) {
+    for (size_t worker_i = 0;; worker_i = (worker_i + 1) % use_workers) {
         if (auto cl = conn_limit(boost::asio::use_awaitable))
             co_await std::move(*cl);
         log_msg(log_level::debug) <<
             "Waiting for connection active_connections=" <<
             active_connections << '/' << log_limit(max_connections);
         auto [ec, conn] = co_await acceptor.async_accept(
-                             boost::asio::make_strand(acceptor.get_executor()),
+                             boost::asio::make_strand(workers[worker_i]->ctx),
                              boost::asio::as_tuple(boost::asio::use_awaitable));
         if (ec)
             log_msg(log_level::err) << "Cannot accept connection: " <<
@@ -123,7 +130,8 @@ boost::asio::awaitable<void> http_server::accept_loop()
                 log_msg(log_level::info, {sid}) <<
                     "Accepted connection client=" << conn.remote_endpoint() <<
                     " active=" << ac <<
-                    " maximum=" << log_limit(max_connections);
+                    " maximum=" << log_limit(max_connections) <<
+                    " pool=" << (worker_i + 1) << '/' << use_workers;
                 co_spawn(conn.get_executor(),
                          handle_connection(std::move(conn), std::move(client),
                                            sid),
@@ -349,6 +357,10 @@ bool http_server::run()
     }
     boost::asio::co_spawn(acceptor.get_executor(), accept_loop(),
                           co_spawn_handler);
+    log_msg(log_level::notice) <<
+        "Listening port=" << port <<
+        " pools=" << use_workers <<
+        " accept_pool=" << (use_workers < workers.size());
     return true;
 }
 

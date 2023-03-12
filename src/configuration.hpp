@@ -25,6 +25,7 @@ public:
         return _log_level;
     }
     static int num_threads(const proto::ThreadPool* cfg);
+    int main_pools() const;
     uint16_t http_port() const;
     static std::optional<std::chrono::nanoseconds> get_time(float t);
 private:

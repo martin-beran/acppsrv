@@ -4,6 +4,7 @@
 
 #include <boost/asio/executor_work_guard.hpp>
 #include <string>
+#include <vector>
 
 namespace acppsrv {
 
@@ -41,5 +42,7 @@ private:
     boost::asio::executor_work_guard<boost::asio::io_context::executor_type>
         work{ctx.get_executor()};
 };
+
+using thread_pools_t = std::vector<std::unique_ptr<thread_pool>>;
 
 } // namespace acppsrv

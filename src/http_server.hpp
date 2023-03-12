@@ -1,5 +1,7 @@
 #pragma once
 
+#include "worker.hpp"
+
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
 
@@ -15,7 +17,6 @@ namespace acppsrv {
 class configuration;
 class db_server;
 class log_msg;
-class thread_pool;
 class http_handler;
 
 namespace http_hnd {
@@ -36,7 +37,7 @@ public:
     using empty_response_type =
         boost::beast::http::response<boost::beast::http::empty_body>;
     static_assert(std::is_same_v<endpoint_type, acceptor_type::endpoint_type>);
-    http_server(const configuration& cfg, thread_pool& workers,
+    http_server(const configuration& cfg, thread_pools_t& workers,
                 std::string_view app_name, std::string_view app_version,
                 db_server& db_srv);
     http_server(const http_server&) = delete;
@@ -72,12 +73,13 @@ private:
     std::optional<uint32_t> keepalive_requests;
     std::optional<uint32_t> max_request_headers;
     std::optional<uint32_t> max_request_body;
-    thread_pool& workers;
+    thread_pools_t& workers;
+    size_t use_workers;
     acceptor_type acceptor;
     std::atomic<size_t> active_connections{0};
     std::mutex active_connections_mtx;
     std::optional<boost::asio::async_result<
-        boost::asio::use_awaitable_t<decltype(acceptor)::executor_type>,
+        boost::asio::use_awaitable_t<acceptor_type::executor_type>,
         void()>::handler_type> active_connections_hnd;
     std::atomic<uint64_t> session{0};
     std::map<std::string, std::unique_ptr<http_handler>> handlers;

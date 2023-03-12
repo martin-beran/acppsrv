@@ -16,8 +16,11 @@ bool application::run()
         &cfg.data().thread_pools() : nullptr;
     thread_pool control_pool(tp && tp->has_control() ? &tp->control() : nullptr,
                              std::string{pool_control_name});
-    thread_pool main_pool(tp && tp->has_main() ? &tp->main() : nullptr,
-                          std::string{pool_main_name});
+    thread_pools_t main_pools;
+    for (int i = 1; i <= cfg.main_pools(); ++i)
+        main_pools.emplace_back(std::make_unique<thread_pool>(
+            tp && tp->has_main() ? &tp->main() : nullptr,
+            std::string{pool_main_name} + "." +  std::to_string(i)));
     thread_pool database_pool(tp && tp->has_database() ?
                               &tp->database() : nullptr,
                               std::string{pool_database_name});
@@ -32,7 +35,7 @@ bool application::run()
     // Set up the control pool
     boost::asio::signal_set termsig{control_pool.ctx, SIGINT, SIGTERM};
     termsig.async_wait(
-        [&main_pool, &database_pool, &db_srv](
+        [&main_pools, &database_pool, &db_srv](
             const boost::system::error_code& ec, int sig
         ) {
             if (ec)
@@ -53,33 +56,43 @@ bool application::run()
                     break;
                 }
             }
-            main_pool.stop();
+            for (auto&& p: main_pools)
+                p->stop();
             database_pool.stop();
             db_srv.interrupt();
         });
     // Set up the main pool
-    http_server http_srv(cfg, main_pool, name, version, db_srv);
-    if (!http_srv.run()) {
-        log_msg(log_level::crit) << "Cannot initialize HTTP server";
-        return false;
+    {
+        http_server http_srv(cfg, main_pools, name, version, db_srv);
+        if (!http_srv.run()) {
+            log_msg(log_level::crit) << "Cannot initialize HTTP server";
+            return false;
+        }
+        // Start processing
+        log_msg(log_level::notice) << "Initialized, starting worker threads";
+        control_pool.run(false);
+        for (auto&& p: main_pools)
+            p->run(true);
+        database_pool.run(true);
+        // We need pool's ctx to register an async op, so any async object
+        // belonging to the pool must be created after the pool. But this
+        // causes destruction of async objects before destruction of the pool,
+        // causing cancellation of all async ops. Therefore we must call wait()
+        // explicitly and not let it be executed implicitly by pool's
+        // destructor, because it would cancel at least termsig, causing
+        // immediate termination of the whole program.
+        // Also, destruction of an async object from the main thread would
+        // create a race condition with any operation on the same object
+        // performed by pool's threads.
+        control_pool.wait();
+        for (auto&& p: main_pools)
+            p->wait();
     }
-    // Start processing
-    log_msg(log_level::notice) << "Initialized, starting worker threads";
-    control_pool.run(false);
-    main_pool.run(true);
-    database_pool.run(true);
-    // We need pool's ctx to register an async op, so any async object
-    // belonging to the pool must be created after the pool. But this causes
-    // destruction of async objects before destruction of the pool, causing
-    // cancellation of all async ops. Therefore we must call wait() explicitly
-    // and not let it be executed implicitly by pool's destructor, because it
-    // would cancel at least termsig, causing immediate termination of the
-    // whole program.
-    // Also, destruction of an async object from the main thread would create a
-    // race condition with any operation on the same object performed by pool's
-    // threads.
-    control_pool.wait();
-    main_pool.wait();
+    // The io_context used to run the acceptor must be deleted before any
+    // io_context owning an accepted socket, otherwise an error is reported by
+    // UB sanitizer, for some reason caused by the internal implementation of
+    // Boost.Asio.
+    main_pools.back().reset();
     return true;
 }
 

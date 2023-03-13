@@ -87,6 +87,7 @@ bool application::run()
         control_pool.wait();
         for (auto&& p: main_pools)
             p->wait();
+        database_pool.wait();
     }
     // The io_context used to run the acceptor must be deleted before any
     // io_context owning an accepted socket, otherwise an error is reported by

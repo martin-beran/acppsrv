@@ -22,6 +22,7 @@
                 "queries": {
                     "size": "select count() from data",
                     "get": "select value from data where key = ?1",
+                    "get_val": "select value from data where value = 'val[' || ?1 || ']' limit 1",
                     "set": "insert into data values (?1, ?2)",
                     "list": "select key, value from data order by key",
                     "erase": "delete from data where key = ?1",

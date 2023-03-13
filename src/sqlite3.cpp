@@ -27,6 +27,7 @@ connection::impl::impl(connection& conn): conn(conn)
                                      SQLITE_OPEN_READWRITE |
                                      SQLITE_OPEN_URI |
                                      SQLITE_OPEN_NOMUTEX |
+                                     SQLITE_OPEN_PRIVATECACHE |
                                      SQLITE_OPEN_EXRESCODE,
                                      nullptr);
         status != SQLITE_OK)

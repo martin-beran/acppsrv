@@ -36,6 +36,12 @@ connection::impl::impl(connection& conn): conn(conn)
             throw error("sqlite3_open_v2", conn._file);
         throw error("sqlite3_open_v2", conn, *this);
     }
+    if (int status = sqlite3_exec(db, "pragma synchronous = normal", nullptr,
+                                  nullptr, nullptr);
+        status != SQLITE_OK)
+    {
+        throw error("sqlite3_exec(pragma)", conn, *this);
+    }
     assert(db);
 }
 
@@ -176,12 +182,13 @@ query::column_value query::get_column(int i)
 
 query::status query::next_row(uint32_t retries)
 {
-    switch (auto status = sqlite3_step(_impl->stmt)) {
+    switch (auto status = sqlite3_step(_impl->stmt); status % 256) {
     case SQLITE_DONE:
         return status::done;
     case SQLITE_ROW:
         return status::row;
     case SQLITE_BUSY:
+    case SQLITE_LOCKED:
         if (retries > 0) {
             log_msg(log_level::debug) << "Database \"" + _db._file +
                 "\" locked in query \"" + _sql_id + "\" retries=" << retries;
@@ -195,8 +202,7 @@ query::status query::next_row(uint32_t retries)
 
 void query::start(bool restart)
 {
-    if (sqlite3_reset(_impl->stmt) != SQLITE_OK && !restart)
-        throw error("sqlite3_reset", _db, _sql_id);
+    sqlite3_reset(_impl->stmt);
     if (!restart && sqlite3_clear_bindings(_impl->stmt) != SQLITE_OK)
         throw error("sqlite3_clear_bindings", _db, _sql_id);
 }

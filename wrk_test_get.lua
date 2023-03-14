@@ -2,7 +2,8 @@
 
 body0 = '{"db":"key_value","query":"get","args":[{"v_int64":'
 -- body0 = '{"db":"key_value","query":"get_val","args":[{"v_int64":'
-body1 = "}]}"
+body0 = '{"db":"key_value","query":"update","args":[{"v_int64":'
+body1 = '}],"retry_if_locked":true}'
 key_range = 100000000
 -- key_range = 1000
 

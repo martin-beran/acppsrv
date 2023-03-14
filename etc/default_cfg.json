@@ -26,7 +26,8 @@
                     "set": "insert into data values (?1, ?2)",
                     "list": "select key, value from data order by key",
                     "erase": "delete from data where key = ?1",
-                    "clear": "delete from data"
+                    "clear": "delete from data",
+                    "update": "update data set value=value+1 where key=?1"
                 },
                 "retries": 100,
                 "retry_wait": 0.1

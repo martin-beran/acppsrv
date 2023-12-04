@@ -126,6 +126,7 @@ find_program(
 
 # Subdirectories with CMake configurations
 add_subdirectory(src)
+add_subdirectory(benchmark)
 
 # Generate documentation, optional (Markdown)
 if (MARKDOWN)

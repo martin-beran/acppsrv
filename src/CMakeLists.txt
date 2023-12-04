@@ -11,6 +11,19 @@ message("Protobuf generated sources: ${PROTO_CPP}")
 add_library(proto_obj OBJECT ${PROTO_CPP})
 target_compile_options(proto_obj PRIVATE -Wno-sign-conversion)
 
+# Library containing functionality shared by executables acppsrv and benchmark 
+add_library(
+    acpplib STATIC
+    log.cpp
+    sqlite3.cpp
+    $<TARGET_OBJECTS:proto_obj>
+)
+target_include_directories(
+    acpplib PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_BINARY_DIR}
+)
+
 # The main ACppSrv executable
 add_executable(
     acppsrv
@@ -22,14 +35,11 @@ add_executable(
     http_hnd_echo.cpp
     http_hnd_stat.cpp
     http_server.cpp
-    log.cpp
-    sqlite3.cpp
     worker.cpp
-    $<TARGET_OBJECTS:proto_obj>
 )
-target_include_directories(acppsrv PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 target_link_libraries(
     acppsrv
+    acpplib
     protobuf::libprotobuf
     SQLite::SQLite3
 )

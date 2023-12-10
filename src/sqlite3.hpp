@@ -15,7 +15,7 @@ class eval;
 class connection {
 public:
     // not using string_view, because sqlite3 requires null-terminated strings
-    explicit connection(std::string file);
+    explicit connection(std::string file, bool create = false);
     connection(const connection&) = delete;
     connection(connection&&) = delete;
     ~connection();
@@ -58,14 +58,14 @@ public:
     ~query();
     query& operator=(const query&) = delete;
     query& operator=(query&&) = delete;
-    void start(bool restart);
-    void bind(int i, std::nullptr_t v);
-    void bind(int i, int64_t v);
-    void bind(int i, double v);
-    void bind(int i, const std::string& v);
-    void bind_blob(int i, const std::string& v);
+    query& start(bool restart = false);
+    query& bind(int i, std::nullptr_t v);
+    query& bind(int i, int64_t v);
+    query& bind(int i, double v);
+    query& bind(int i, const std::string& v);
+    query& bind_blob(int i, const std::string& v);
     int column_count();
-    status next_row(uint32_t retries);
+    status next_row(uint32_t retries = 0);
     column_value get_column(int i);
 private:
     class impl;
@@ -73,11 +73,6 @@ private:
     std::string _sql;
     std::string _sql_id;
     std::unique_ptr<impl> _impl;
-};
-
-class eval {
-public:
-    eval(query& q);
 };
 
 class error: public std::runtime_error {

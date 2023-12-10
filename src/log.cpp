@@ -62,8 +62,8 @@ std::optional<log_level> from_string(std::string_view str)
         {"error", log_level::err},
 
         {"W", log_level::warning},
-        {"warning", log_level::warning},
         {"warn", log_level::warning},
+        {"warning", log_level::warning},
 
         {"N", log_level::notice},
         {"notice", log_level::notice},

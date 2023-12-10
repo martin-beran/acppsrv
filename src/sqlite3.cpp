@@ -11,7 +11,7 @@ namespace acppsrv::sqlite {
 
 class connection::impl {
 public:
-    explicit impl(connection& conn);
+    explicit impl(connection& conn, bool create);
     impl(const impl&) = delete;
     impl(impl&&) = delete;
     ~impl();
@@ -21,10 +21,11 @@ public:
     sqlite3* db = nullptr;
 };
 
-connection::impl::impl(connection& conn): conn(conn)
+connection::impl::impl(connection& conn, bool create): conn(conn)
 {
     if (int status = sqlite3_open_v2(conn._file.c_str(), &db,
                                      SQLITE_OPEN_READWRITE |
+                                     (create ? SQLITE_OPEN_CREATE : 0) |
                                      SQLITE_OPEN_URI |
                                      SQLITE_OPEN_NOMUTEX |
                                      SQLITE_OPEN_PRIVATECACHE |
@@ -57,8 +58,8 @@ connection::impl::~impl()
 
 /*** connection **************************************************************/
 
-connection::connection(std::string file):
-    _file(std::move(file)), _impl(std::make_unique<impl>(*this))
+connection::connection(std::string file, bool create):
+    _file(std::move(file)), _impl(std::make_unique<impl>(*this, create))
 {
 }
 
@@ -89,6 +90,7 @@ public:
 
 query::impl::impl(query& q): q(q)
 {
+    log_msg(log_level::debug) << "Prepare SQL query: " << q._sql;
     // sqlite3 allows passing size incl. terminating NUL
     if (sqlite3_prepare_v3(q._db._impl->db, q._sql.c_str(),
                            int(q._sql.size() + 1),
@@ -116,40 +118,46 @@ query::query(connection& db, std::string sql, std::string sql_id):
 
 query::~query() = default;
 
-void query::bind(int i, std::nullptr_t)
+query& query::bind(int i, std::nullptr_t)
 {
     if (sqlite3_bind_null(_impl->stmt, i + 1) != SQLITE_OK)
         throw error("sqlite3_bind_null", _db, _sql_id);
+    return *this;
 }
 
-void query::bind(int i, int64_t v)
+query& query::bind(int i, int64_t v)
 {
     if (sqlite3_bind_int64(_impl->stmt, i + 1, v) != SQLITE_OK)
         throw error("sqlite3_bind_int64", _db, _sql_id);
+    return *this;
 }
 
-void query::bind(int i, double v)
+query& query::bind(int i, double v)
 {
     if (sqlite3_bind_double(_impl->stmt, i + 1, v) != SQLITE_OK)
         throw error("sqlite3_bind_double", _db, _sql_id);
+    return *this;
 }
 
-void query::bind(int i, const std::string& v)
+query& query::bind(int i, const std::string& v)
 {
     if (sqlite3_bind_text(_impl->stmt, i + 1, v.c_str(), int(v.size()),
                           SQLITE_STATIC) != SQLITE_OK)
     {
         throw error("sqlite3_bind_text", _db, _sql_id);
     }
+    DEBUG() << "bind i=" << i << " v=" << v;
+    return *this;
 }
 
-void query::bind_blob(int i, const std::string& v)
+query& query::bind_blob(int i, const std::string& v)
 {
     if (sqlite3_bind_blob(_impl->stmt, i + 1, v.c_str(), int(v.size()),
                           SQLITE_STATIC) != SQLITE_OK)
     {
         throw error("sqlite3_bind_blob", _db, _sql_id);
     }
+    return *this;
 }
 
 int query::column_count()
@@ -200,11 +208,12 @@ query::status query::next_row(uint32_t retries)
     }
 }
 
-void query::start(bool restart)
+query& query::start(bool restart)
 {
     sqlite3_reset(_impl->stmt);
     if (!restart && sqlite3_clear_bindings(_impl->stmt) != SQLITE_OK)
         throw error("sqlite3_clear_bindings", _db, _sql_id);
+    return *this;
 }
 
 /*** error *******************************************************************/

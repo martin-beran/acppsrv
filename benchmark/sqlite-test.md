@@ -12,6 +12,7 @@
         - data
             - record
                 - key 32 B
+                - update counter 8 B
                 - value 32 B
             - 12 GB
         - index
@@ -29,6 +30,7 @@
         - data
             - record
                 - key 32 B
+                - update counter 8 B
                 - value 570 B
             - 25 GB
         - index

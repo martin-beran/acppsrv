@@ -38,6 +38,7 @@ constexpr size_t value_sz_max = 4096;
 constexpr unsigned long create_queue_max = 1'000;
 // A duration message will be logged each time this number of new recods is created
 constexpr unsigned long create_log_interval = 100'000;
+constexpr unsigned transaction_sz = 100;
 
 // We expect a key to be SHA256, that is, essentially 32 random bytes, so that
 // we can take independent subspans of it as the hash functions for assigning a
@@ -224,6 +225,9 @@ private:
     std::optional<sqlite::connection> db;
     std::optional<sqlite::query> insert_data;
     std::optional<sqlite::query> insert_idx;
+    std::optional<sqlite::query> begin_transaction;
+    std::optional<sqlite::query> commit_transaction;
+    unsigned cur_tx = 0;
     FILE* keys_file = nullptr;
 };
 
@@ -323,6 +327,8 @@ partition::partition(asio::io_context& ctx, const create_args& args, unsigned id
     // Prepare queries for inserting data
     insert_data.emplace(*db, R"(insert into main.data values (?1, ?2, ?3, ?4) returning oid)");
     insert_idx.emplace(*db, R"(insert into idx.idx values (?1, ?2))");
+    begin_transaction.emplace(*db, R"(begin)");
+    commit_transaction.emplace(*db, R"(commit)");
 }
 
 partition::~partition()
@@ -338,9 +344,15 @@ partition::~partition()
 
 void partition::handle_create(worker& wrk, db_record rec)
 {
-    log_msg(log_level::debug) << "Add record for partition " << rec.partition << " by partition handler " << idx;
     assert(insert_data);
     assert(insert_idx);
+    assert(begin_transaction);
+    assert(commit_transaction);
+    if (cur_tx == 0) {
+        log_msg(log_level::debug) << "Begin transaction";
+        assert(begin_transaction->start().next_row() == sqlite::query::status::done);
+    }
+    log_msg(log_level::debug) << "Add record for partition " << rec.partition << " by partition handler " << idx;
     assert(insert_data->start().bind_blob(0, rec.key).bind(1, int64_t(rec.hash)).bind(2, rec.counter).
            bind_blob(3, rec.value).next_row() == sqlite::query::status::row);
     assert(insert_data->column_count() == 1);
@@ -353,8 +365,17 @@ void partition::handle_create(worker& wrk, db_record rec)
     {
         throw keys_write(path_keys());
     }
-    if (!wrk.is_done()) 
+    if (!wrk.is_done()) {
+        if (++cur_tx == transaction_sz) {
+            log_msg(log_level::debug) << "Commit transaction";
+            assert(commit_transaction->start().next_row() == sqlite::query::status::done);
+            cur_tx = 0;
+        }
         wrk.create_record();
+    } else {
+        log_msg(log_level::debug) << "Commit transaction";
+        assert(commit_transaction->start().next_row() == sqlite::query::status::done);
+    }
 }
 
 std::ostream& operator<<(std::ostream& os, const worker::time_ref& t)

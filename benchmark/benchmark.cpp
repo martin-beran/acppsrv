@@ -285,6 +285,8 @@ partition::partition(asio::io_context& ctx, const create_args& args, unsigned id
         sqlite::query(*db, R"(pragma idx.journal_mode = off)").start().next_row();
         sqlite::query(*db, R"(pragma main.synchronous = off)").start().next_row();
         sqlite::query(*db, R"(pragma idx.synchronous = off)").start().next_row();
+        sqlite::query(*db, R"(pragma main.locking_mode = exclusive)").start().next_row();
+        sqlite::query(*db, R"(pragma idx.locking_mode = exclusive)").start().next_row();
         // configure page sizes for data and index database files
         int64_t page_size = 4096;
         if (args.value_sz < 3900)

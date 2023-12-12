@@ -1,11 +1,20 @@
 #include "log.hpp"
 #include "sqlite3.hpp"
+#include "worker.hpp"
+
+#include <boost/asio.hpp>
+#include <boost/asio/bind_executor.hpp>
+#include <boost/beast.hpp>
+
+#include <openssl/sha.h>
 
 #include <charconv>
 #include <cassert>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <iomanip>
 #include <iostream>
 #include <span>
 #include <string_view>
@@ -18,25 +27,34 @@ using namespace std::string_view_literals;
 
 namespace {
 
+namespace asio = boost::asio;
+
 constexpr unsigned partitions_min = 1;
 constexpr unsigned partitions_max = 256;
+constexpr size_t key_sz = 32; // do not change this value
 constexpr size_t value_sz_min = 1;
 constexpr size_t value_sz_max = 4096;
+// The maximum number of outstanding requests for creation a database record
+constexpr unsigned long create_queue_max = 1'000;
+// A duration message will be logged each time this number of new recods is created
+constexpr unsigned long create_log_interval = 100'000;
 
-// We expect key to be SHA256, that is, essentially 32 random bytes, so that we
-// can take independent subspans of it as the hash functions for assigning
-// a key to a partition and for indexing records.
+// We expect a key to be SHA256, that is, essentially 32 random bytes, so that
+// we can take independent subspans of it as the hash functions for assigning a
+// key to a partition and for indexing records. The first byte is used to
+// select a partition and the next 4 bytes are used as the key hash value.
+
 [[maybe_unused]] unsigned partition_key(std::span<char> key)
 {
-    if (key.size() > 0)
+    if (!key.empty())
         return static_cast<unsigned char>(key[0]);
     else
         return 0U;
 }
 
-[[maybe_unused]] int32_t hash_key(std::span<char> key)
+[[maybe_unused]] uint32_t hash_key(std::span<char> key)
 {
-    int32_t hash = 0U;
+    uint32_t hash = 0U;
     if (key.size() >= 5) {
         std::memcpy(&hash, &key[1], 4);
     }
@@ -116,7 +134,7 @@ namespace cmd {
 
 namespace create_impl {
 
-struct partition_args {
+struct create_args {
     std::string path;
     unsigned partitions;
     unsigned long records;
@@ -125,42 +143,148 @@ struct partition_args {
     unsigned threads;
 };
 
+class worker;
+
+struct db_record {
+    struct thread_init {};
+    db_record() = default;
+    explicit db_record(thread_init) {
+        pid_t pid = getpid();
+        pthread_t tid = pthread_self();
+        key.resize(key_sz);
+        static_assert(key_sz >= sizeof(pid) + sizeof(tid));
+        memmove(key.data(), &pid, sizeof(pid));
+        memmove(key.data() + sizeof(pid), &tid, sizeof(tid));
+    }
+    void update(size_t partitions, size_t value_sz);
+    unsigned partition = 0;
+    uint32_t hash = 0;
+    int64_t counter = 0;
+    std::string key = {};
+    std::string value = {};
+};
+
+void db_record::update(size_t partitions, size_t value_sz)
+{
+    static_assert(key_sz == SHA256_DIGEST_LENGTH);
+    char buf[SHA256_DIGEST_LENGTH];
+    SHA256(reinterpret_cast<unsigned char*>(key.data()), key.size(), reinterpret_cast<unsigned char*>(buf));
+    key.resize(key_sz);
+    memcpy(key.data(), buf, key_sz);
+    partition = partition_key(key) % partitions;
+    hash = hash_key(key);
+    value.resize(value_sz);
+    for (size_t i = 0; i < value.size() / key_sz; ++i)
+        memcpy(value.data() + i * key_sz, key.data(), key_sz);
+}
+
 class partition {
 public:
+    // Data file in SQLite3 format
+    static constexpr std::string_view path_suffix_data = "_data.sqlite"sv;
+    // Index file in SQLite3 format
+    static constexpr std::string_view path_suffix_idx = "_idx.sqlite"sv;
+    // List of keys, concatenated partition indices and binary keys, 1+4 B each, used to obtain
+    // records for update operations
+    static constexpr std::string_view path_suffix_keys = "_keys.bin"sv;
     class exists: public std::runtime_error {
     public:
-        exists(std::string_view path):
+        explicit exists(std::string_view path):
             std::runtime_error(std::string("Database file \"").append(path).append(" already exists")) {}
     };
-    partition(const partition_args& args, unsigned idx, bool create);
+    class keys_write: public std::runtime_error {
+    public:
+        explicit keys_write(std::string_view path):
+            std::runtime_error(std::string("Cannot writel keys file \"").append(path).append("\"")) {}
+    };
+    partition(asio::io_context& ctx, const create_args& args, unsigned idx, bool create);
+    partition(const partition&) = delete;
+    partition(partition&&) = delete;
     ~partition();
+    partition& operator=(const partition&) = delete;
+    partition& operator=(partition&&) = delete;
+    static std::string path_idx(std::string_view path, unsigned idx) {
+        return (std::ostringstream{} << path << std::setw(3) << std::setfill('0') << idx).str();
+    }
     std::string path_data() const {
-        return path + "_data.sqlite";
+        return std::string{path}.append(path_suffix_data);
     }
     std::string path_idx() const {
-        return path + "_idx.sqlite";
+        return std::string{path}.append(path_suffix_idx);
     }
+    std::string path_keys() const {
+        return std::string{path}.append(path_suffix_keys);
+    }
+    void handle_create(worker& wrk, db_record rec);
+    asio::io_context::strand strand;
+    const create_args& args;
+    const unsigned idx;
 private:
     std::string path;
     std::optional<sqlite::connection> db;
+    std::optional<sqlite::query> insert_data;
+    std::optional<sqlite::query> insert_idx;
+    FILE* keys_file = nullptr;
 };
 
-partition::partition(const partition_args& args, unsigned idx, bool create)
+using partitions = std::vector<std::unique_ptr<partition>>;
+
+class worker {
+public:
+    using clock = std::chrono::steady_clock;
+    class time_ref {
+    public:
+        explicit time_ref(worker& w): w(w) {}
+        std::pair<clock::duration, clock::duration> duration() const {
+            if (w.t0 == clock::time_point{})
+                return {clock::duration{}, clock::duration{}};
+            auto t = clock::now();
+            auto d0 = t - w.t0;
+            auto d1 = t - w.t1;
+            w.t1 = t;
+            return {d1, d0};
+        }
+    private:
+        worker& w;
+    };
+    explicit worker(partitions& parts): parts(parts) {}
+    void init(unsigned long requests);
+    void create_record();
+    time_ref time() {
+        return time_ref(*this);
+    }
+    bool is_done();
+    void log_end() {
+        log_msg(log_level::info) << "End records=" << records << " time=" << time();
+    }
+private:
+    std::atomic<unsigned long> records = 0;
+    partitions& parts;
+    clock::time_point t0{};
+    clock::time_point t1{};
+};
+
+partition::partition(asio::io_context& ctx, const create_args& args, unsigned idx, bool create):
+    strand{ctx}, args{args}, idx{idx}, path{path_idx(args.path, idx)}
 {
-    path = (std::ostringstream{} << args.path << std::setw(3) << std::setfill('0') << idx).str();
     if (create) {
         if (std::filesystem::exists(path_data()))
             throw exists(path_data());
         sqlite::connection data(path_data(), true);
         if (std::filesystem::exists(path_idx()))
             throw exists(path_idx());
+        if (std::filesystem::exists(path_keys()))
+            throw exists(path_keys());
         sqlite::connection idx(path_idx(), true);
     }
     db.emplace(path_data());
     sqlite::query(*db, R"(attach database ?1 as idx)").start().bind(0, path_idx()).next_row();
     if (create) {
-        // speed up populating the database by turning off journaling
-        sqlite::query(*db, R"(pragma journal_mode = off)").start().next_row();
+        // speed up populating the database by turning off journaling and filesystem syncing
+        sqlite::query(*db, R"(pragma main.journal_mode = off)").start().next_row();
+        sqlite::query(*db, R"(pragma idx.journal_mode = off)").start().next_row();
+        sqlite::query(*db, R"(pragma main.synchronous = off)").start().next_row();
+        sqlite::query(*db, R"(pragma idx.synchronous = off)").start().next_row();
         // configure page sizes for data and index database files
         int64_t page_size = 4096;
         if (args.value_sz < 3900)
@@ -172,8 +296,10 @@ partition::partition(const partition_args& args, unsigned idx, bool create)
         sqlite::query(*db, R"(pragma main.page_size = )" + std::to_string(page_size)).start().next_row();
         sqlite::query(*db, R"(pragma idx.page_size = 512)").start().next_row();
         // create tables
-        sqlite::query(*db, R"(create table main.data (key blob not null, counter int not null default 0, data blob))").
-            start().next_row();
+        sqlite::query(*db, R"(
+            create table main.data
+                (key blob not null, hash int not null, counter int not null default 0, value blob not null default '')
+            )").start().next_row();
         sqlite::query(*db,
             R"(create table idx.idx (hash int not null, id int not null, primary key (hash, id)) without rowid)").
             start().next_row();
@@ -183,23 +309,86 @@ partition::partition(const partition_args& args, unsigned idx, bool create)
     // setting the page size. It is not remembered, therefore we must set it
     // every time the database is opened.
     double cache_sz = double(args.cache_kib) / args.partitions;
-    double data_record = 8.0 /* id+overhead */ + 32.0 /* key */ + 8 /* counter */ +
+    double data_record = 8.0 /* id+overhead */ + key_sz /* key */ + 4 /* hash of key */ + 8 /* counter */ +
         double(args.value_sz) /* data */;
     double idx_record = 8.0 /* overhead */ + 4.0 /* hash of key */ + 4 /* record id */;
     sqlite::query(*db, R"(pragma main.cache_size = )" +
                   std::to_string(int64_t(-cache_sz * data_record / (data_record + idx_record)))).start().next_row();
     sqlite::query(*db, R"(pragma idx.cache_size = )" +
                   std::to_string(int64_t(-cache_sz * idx_record / (data_record + idx_record)))).start().next_row();
+    if (keys_file = fopen(path_keys().c_str(), "ab"); !keys_file)
+        throw keys_write(path_keys());
+    // Prepare queries for inserting data
+    insert_data.emplace(*db, R"(insert into main.data values (?1, ?2, ?3, ?4) returning oid)");
+    insert_idx.emplace(*db, R"(insert into idx.idx values (?1, ?2))");
 }
 
 partition::~partition()
 {
     // enable WAL for regular database operation
-    if (db)
-        sqlite::query(*db, R"(pragma journal_mode = wal)").start().next_row();
+    if (db) {
+        sqlite::query(*db, R"(pragma main.journal_mode = wal)").start().next_row();
+        sqlite::query(*db, R"(pragma idx.journal_mode = wal)").start().next_row();
+    }
+    if (keys_file)
+        (void)fclose(keys_file);
 }
 
-using partitions = std::vector<std::unique_ptr<partition>>;
+void partition::handle_create(worker& wrk, db_record rec)
+{
+    log_msg(log_level::debug) << "Add record for partition " << rec.partition << " by partition handler " << idx;
+    assert(insert_data);
+    assert(insert_idx);
+    assert(insert_data->start().bind_blob(0, rec.key).bind(1, int64_t(rec.hash)).bind(2, rec.counter).
+           bind_blob(3, rec.value).next_row() == sqlite::query::status::row);
+    assert(insert_data->column_count() == 1);
+    insert_idx->start().bind(0, int64_t(rec.hash)).bind(1, std::get<int64_t>(insert_data->get_column(0)));
+    assert(insert_data->next_row() == sqlite::query::status::done);
+    assert(insert_idx->next_row() == sqlite::query::status::done);
+    auto part = static_cast<unsigned char>(rec.partition);
+    if (fwrite(&part, sizeof(part), 1, keys_file) != 1 ||
+        fwrite(&rec.hash, sizeof(rec.hash), 1, keys_file) != 1)
+    {
+        throw keys_write(path_keys());
+    }
+    if (!wrk.is_done()) 
+        wrk.create_record();
+}
+
+std::ostream& operator<<(std::ostream& os, const worker::time_ref& t)
+{
+    auto [d0, d1] = t.duration();
+    using fsec = std::chrono::duration<double, std::chrono::seconds::period>;
+    os << std::fixed << std::setprecision(6) <<
+        std::chrono::duration_cast<fsec>(d0).count() << '/' << std::chrono::duration_cast<fsec>(d1).count();
+    return os;
+}
+
+void worker::create_record()
+{
+    static thread_local db_record rec{db_record::thread_init{}};
+    rec.update(parts.size(), parts[0]->args.value_sz);
+    asio::post(asio::bind_executor(parts[rec.partition]->strand,
+        [this, &p = *parts[rec.partition], rec = rec]() mutable {
+            p.handle_create(*this, std::move(rec));
+        }));
+}
+
+void worker::init(unsigned long requests)
+{
+    for (unsigned long r = 0; r < requests; ++r)
+        create_record();
+    t0 = std::chrono::steady_clock::now();
+    t1 = t0;
+}
+
+bool worker::is_done()
+{
+    auto r = ++records;
+    if (r % create_log_interval == 0)
+        log_msg(log_level::info) << "Created " << r << " records time=" << time();
+    return r >= parts[0]->args.records;
+}
 
 } // namespace create_impl
 
@@ -209,7 +398,7 @@ int create(std::string_view argv0, [[maybe_unused]] std::string_view cmd, std::s
     // Process command line arguments
     if (args.size() < 5 || args.size() > 6)
         return usage(argv0);
-    partition_args cargs{};
+    create_args cargs{};
     cargs.path = args[0];
     if (auto r = std::from_chars(args[1].begin(), args[1].end(), cargs.partitions);
         r.ec != std::errc{} || cargs.partitions < partitions_min || cargs.partitions > partitions_max)
@@ -252,19 +441,26 @@ int create(std::string_view argv0, [[maybe_unused]] std::string_view cmd, std::s
         " records=" << cargs.records << " value_sz=" << cargs.value_sz <<
         " cache_kib=" << cargs.cache_kib <<" threads=" << cargs.threads;
     // Create database files
+    thread_pool threads(int(cargs.threads), "main");
     partitions db{};
     db.reserve(cargs.partitions);
     for (decltype(cargs.partitions) part = 0; part < cargs.partitions; ++part) {
         log_msg(log_level::info) << "Creating partition " << part;
         try {
-            db.push_back(std::make_unique<partition>(cargs, part, true));
+            db.push_back(std::make_unique<partition>(threads.ctx, cargs, part, true));
         } catch (const partition::exists& e) {
             log_msg(log_level::crit) << e.what();
             return EXIT_FAILURE;
         }
     }
     // Generate data
-    // TODO
+    worker wrk(db);
+    auto requests = std::min(create_queue_max, cargs.records);
+    wrk.init(requests);
+    log_msg(log_level::info) << "Begin with " << requests << " parallel requests time=" << wrk.time();
+    threads.run(false);
+    threads.wait();
+    wrk.log_end();
     return EXIT_SUCCESS;
 }
 

@@ -146,7 +146,6 @@ query& query::bind(int i, const std::string& v)
     {
         throw error("sqlite3_bind_text", _db, _sql_id);
     }
-    DEBUG() << "bind i=" << i << " v=" << v;
     return *this;
 }
 

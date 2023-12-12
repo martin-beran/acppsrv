@@ -18,6 +18,7 @@ class ThreadPool;
 
 class thread_pool {
 public:
+    thread_pool(int num_threads, std::string name);
     thread_pool(const proto::ThreadPool* cfg, std::string name);
     thread_pool(const thread_pool&) = delete;
     thread_pool(thread_pool&&) = delete;

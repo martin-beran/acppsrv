@@ -16,6 +16,7 @@ add_library(
     acpplib STATIC
     log.cpp
     sqlite3.cpp
+    worker.cpp
     $<TARGET_OBJECTS:proto_obj>
 )
 target_include_directories(
@@ -35,7 +36,6 @@ add_executable(
     http_hnd_echo.cpp
     http_hnd_stat.cpp
     http_server.cpp
-    worker.cpp
 )
 target_link_libraries(
     acppsrv

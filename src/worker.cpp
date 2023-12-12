@@ -7,13 +7,18 @@ namespace acppsrv {
 
 thread_local size_t thread_pool::this_thread_idx;
 
-thread_pool::thread_pool(const proto::ThreadPool* cfg, std::string name):
-    ctx(configuration::num_threads(cfg)), name(std::move(name)),
-    threads(size_t(configuration::num_threads(cfg)))
+thread_pool::thread_pool(int num_threads, std::string name):
+    ctx(num_threads), name(std::move(name)),
+    threads(size_t(num_threads))
 {
     assert(!threads.empty());
     log_msg(log_level::notice) << "Created thread pool \"" << this->name <<
         "\" with " << threads.size() << " threads";
+}
+
+thread_pool::thread_pool(const proto::ThreadPool* cfg, std::string name):
+    thread_pool(configuration::num_threads(cfg), std::move(name))
+{
 }
 
 thread_pool::~thread_pool()

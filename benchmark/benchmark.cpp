@@ -325,7 +325,7 @@ partition::partition(asio::io_context& ctx, const create_args& args, unsigned id
     if (keys_file = fopen(path_keys().c_str(), "ab"); !keys_file)
         throw keys_write(path_keys());
     // Prepare queries for inserting data
-    insert_data.emplace(*db, R"(insert into main.data values (?1, ?2, ?3, ?4) returning oid)");
+    insert_data.emplace(*db, R"(insert into main.data values (?1, ?2, ?3, ?4))");
     insert_idx.emplace(*db, R"(insert into idx.idx values (?1, ?2))");
     begin_transaction.emplace(*db, R"(begin)");
     commit_transaction.emplace(*db, R"(commit)");
@@ -354,11 +354,7 @@ void partition::handle_create(worker& wrk, db_record rec)
     }
     log_msg(log_level::debug) << "Add record for partition " << rec.partition << " by partition handler " << idx;
     assert(insert_data->start().bind_blob(0, rec.key).bind(1, int64_t(rec.hash)).bind(2, rec.counter).
-           bind_blob(3, rec.value).next_row() == sqlite::query::status::row);
-    assert(insert_data->column_count() == 1);
-    insert_idx->start().bind(0, int64_t(rec.hash)).bind(1, std::get<int64_t>(insert_data->get_column(0)));
-    assert(insert_data->next_row() == sqlite::query::status::done);
-    assert(insert_idx->next_row() == sqlite::query::status::done);
+           bind_blob(3, rec.value).next_row() == sqlite::query::status::done);
     auto part = static_cast<unsigned char>(rec.partition);
     if (fwrite(&part, sizeof(part), 1, keys_file) != 1 ||
         fwrite(&rec.hash, sizeof(rec.hash), 1, keys_file) != 1)

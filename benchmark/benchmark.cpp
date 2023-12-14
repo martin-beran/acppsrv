@@ -1,3 +1,4 @@
+#include "finally.hpp"
 #include "log.hpp"
 #include "sqlite3.hpp"
 #include "worker.hpp"
@@ -8,6 +9,8 @@
 
 #include <openssl/sha.h>
 
+#include <sys/mman.h>
+
 #include <charconv>
 #include <cassert>
 #include <chrono>
@@ -16,6 +19,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <random>
 #include <span>
 #include <string_view>
 #include <thread>
@@ -33,7 +37,6 @@ constexpr unsigned partitions_min = 1;
 constexpr unsigned partitions_max = 256;
 constexpr size_t key_sz = 32; // do not change this value
 constexpr size_t value_sz_min = 1;
-constexpr size_t value_sz_max = 4096;
 // The maximum number of outstanding requests for creation a database record
 constexpr unsigned long create_queue_max = 1'000;
 // A duration message will be logged each time this number of new recods is created
@@ -78,7 +81,7 @@ int usage(const std::filesystem::path& argv0, bool ok = false)
     if (!ok)
         log_msg(log_level::crit) << "Invalid command line arguments";
     std::cout << "usage: " << argv0.filename().native() <<
-        "[-l LOG_LEVEL] COMMAND [ARGS]\n" << R"(
+        " [-l LOG_LEVEL] COMMAND [ARGS]\n" << R"(
 -l LOG_LEVEL
     Set log level, one of -|off, X|emerg|emergency, A|alert, C|crit|critical,
     E|err|error, W|warn|warning, N|notice, I|info (default), D|debug.
@@ -108,20 +111,26 @@ help
 
     Display this help message and exit.
 
-requests URI REQUESTS INSERTS UPDATES VALUE_SZ [THREADS]
+requests URI KEYS TIME INSERTS UPDATES VALUE_SZ CONNECTIONS [THREADS]
 
     Execute database get/insert/update operations.
 
     URI
         The base URI of the server where requests will be sent.
-    REQUESTS
-        The number of requests to execute
+    KEYS
+        The path to the file containing concatenated binary values of partition
+        index and key hash for every record in the database. It is used to
+        quickly select existing records.
+    TIME
+        How long to generate requests, in seconds
     INSERTS
-        The fraction of insert operations in QUERIES.
+        The fraction of insert operations in QUERIES
     UPDATES
-        The fraction of update operations in QUERIES.
+        The fraction of update operations in QUERIES
     VALUE_SZ
         The size of the variable-size part of each record
+    CONNECTIONS
+        The number of HTTP connections to the server
     THREADS
         The number of worker threads. If unset then the number of threads will
         be equal to the number of CPUs.
@@ -165,27 +174,13 @@ struct db_record {
     std::string value = {};
 };
 
-void db_record::update(size_t partitions, size_t value_sz)
-{
-    static_assert(key_sz == SHA256_DIGEST_LENGTH);
-    char buf[SHA256_DIGEST_LENGTH];
-    SHA256(reinterpret_cast<unsigned char*>(key.data()), key.size(), reinterpret_cast<unsigned char*>(buf));
-    key.resize(key_sz);
-    memcpy(key.data(), buf, key_sz);
-    partition = partition_key(key) % partitions;
-    hash = hash_key(key);
-    value.resize(value_sz);
-    for (size_t i = 0; i < value.size() / key_sz; ++i)
-        memcpy(value.data() + i * key_sz, key.data(), key_sz);
-}
-
 class partition {
 public:
     // Data file in SQLite3 format
     static constexpr std::string_view path_suffix_data = "_data.sqlite"sv;
     // Index file in SQLite3 format
     static constexpr std::string_view path_suffix_idx = "_idx.sqlite"sv;
-    // List of keys, concatenated partition indices and binary keys, 1+4 B each, used to obtain
+    // List of keys, concatenated partition indices and hashes of keys, 1+4 B each, used to obtain
     // records for update operations
     static constexpr std::string_view path_suffix_keys = "_keys.bin"sv;
     class exists: public std::runtime_error {
@@ -196,7 +191,7 @@ public:
     class keys_write: public std::runtime_error {
     public:
         explicit keys_write(std::string_view path):
-            std::runtime_error(std::string("Cannot writel keys file \"").append(path).append("\"")) {}
+            std::runtime_error(std::string("Cannot write keys file \"").append(path).append("\"")) {}
     };
     partition(asio::io_context& ctx, const create_args& args, unsigned idx, bool create);
     partition(const partition&) = delete;
@@ -267,6 +262,24 @@ private:
     clock::time_point t0{};
     clock::time_point t1{};
 };
+
+/*** db_record ***/
+
+void db_record::update(size_t partitions, size_t value_sz)
+{
+    static_assert(key_sz == SHA256_DIGEST_LENGTH);
+    char buf[SHA256_DIGEST_LENGTH];
+    SHA256(reinterpret_cast<unsigned char*>(key.data()), key.size(), reinterpret_cast<unsigned char*>(buf));
+    key.resize(key_sz);
+    memcpy(key.data(), buf, key_sz);
+    partition = partition_key(key) % partitions;
+    hash = hash_key(key);
+    value.resize(value_sz);
+    for (size_t i = 0; i < value.size() / key_sz; ++i)
+        memcpy(value.data() + i * key_sz, key.data(), key_sz);
+}
+
+/*** partition ***/
 
 partition::partition(asio::io_context& ctx, const create_args& args, unsigned idx, bool create):
     strand{ctx}, args{args}, idx{idx}, path{path_idx(args.path, idx)}
@@ -383,6 +396,8 @@ std::ostream& operator<<(std::ostream& os, const worker::time_ref& t)
     return os;
 }
 
+/*** worker ***/
+
 void worker::create_record()
 {
     static thread_local db_record rec{db_record::thread_init{}};
@@ -414,7 +429,8 @@ bool worker::is_done()
 int create(std::string_view argv0, [[maybe_unused]] std::string_view cmd, std::span<const std::string_view> args)
 {
     using namespace create_impl;
-    // Process command line arguments
+    // Process command line arguments. See a more defensive method of iterating
+    // over arguments in cmd::requests().
     if (args.size() < 5 || args.size() > 6)
         return usage(argv0);
     create_args cargs{};
@@ -433,10 +449,9 @@ int create(std::string_view argv0, [[maybe_unused]] std::string_view cmd, std::s
         return usage(argv0);
     }
     if (auto r = std::from_chars(args[3].begin(), args[3].end(), cargs.value_sz);
-        r.ec != std::errc{} || cargs.value_sz < value_sz_min || cargs.value_sz > value_sz_max)
+        r.ec != std::errc{} || cargs.value_sz < value_sz_min)
     {
-        log_msg(log_level::crit) << "Value size (VALUE_SZ) must be between " << value_sz_min << " and " <<
-            value_sz_max;
+        log_msg(log_level::crit) << "Value size (VALUE_SZ) must at least " << value_sz_min;
         return usage(argv0);
     }
     if (auto r = std::from_chars(args[4].begin(), args[4].end(), cargs.cache_kib);
@@ -497,12 +512,77 @@ namespace requests_impl {
 
 struct requests_args {
     std::string uri;
-    unsigned long requests;
+    std::string keys;
+    std::chrono::steady_clock::duration time;
     double inserts;
     double updates;
     size_t value_sz;
+    unsigned connections;
     unsigned threads;
 };
+
+class known_key_generator {
+public:
+    struct key {
+        unsigned partition;
+        size_t hash;
+    };
+    class keys_mmap: public std::runtime_error {
+    public:
+        explicit keys_mmap(std::string_view path):
+            std::runtime_error(std::string("Cannot mmap keys file \"").append(path).append("\"")) {}
+    };
+    explicit known_key_generator(const std::filesystem::path& path);
+    ~known_key_generator();
+    key get_key();
+    void add(const key& k) {
+        added.push_back(k);
+    }
+private:
+    static constexpr size_t key_sz = sizeof(unsigned char) + sizeof(uint32_t);
+    const unsigned char* data;
+    size_t data_sz;
+    size_t sz;
+    std::vector<key> added;
+    std::mt19937_64 rnd;
+};
+
+/*** known_key_generator ***/
+
+known_key_generator::known_key_generator(const std::filesystem::path& path): rnd{std::random_device{}()}
+{
+    int fd = -1;
+    util::finally fd_close([&fd]() {
+        if (fd >= 0)
+            close(fd);
+    });
+    if (fd = open(path.c_str(), O_RDONLY); fd < 0)
+        throw keys_mmap(path.native());
+    data_sz = std::filesystem::file_size(path.c_str());
+    if (data = reinterpret_cast<unsigned char* >(mmap(nullptr, sz, PROT_READ, MAP_SHARED, fd, 0)); !data)
+        throw keys_mmap(path.native());
+    sz = data_sz / key_sz;
+    log_msg(log_level::notice) << "Mapped file \"" << path.native() << "\" containing " << sz << " keys";
+}
+
+known_key_generator::~known_key_generator()
+{
+    if (data)
+        munmap(const_cast<void*>(static_cast<const void*>(data)), data_sz);
+}
+
+known_key_generator::key known_key_generator::get_key()
+{
+    size_t i = rnd() % (sz + added.size());
+    if (i >= sz)
+        return added[i - sz];
+    else {
+        key result{};
+        result.partition = data[i * key_sz];
+        std::memcpy(&result.hash, data + i * key_sz + 1, sizeof(result.hash));
+        return result;
+    }
+}
 
 } // namespace requests_impl
 
@@ -510,50 +590,79 @@ int requests(std::string_view argv0, [[maybe_unused]] std::string_view cmd,
              std::span<const std::string_view> args)
 {
     using namespace requests_impl;
-    // Process command line arguments
-    if (args.size() < 5 || args.size() > 6)
-        return usage(argv0);
+    // Process command line arguments. This is a more defensive method than in cmd::create()
+    auto it = args.end();
+    struct args_count {};
+    auto next_arg = [&it, &args] {
+        if (it == args.end())
+            it = args.begin();
+        else
+            ++it;
+        if (it == args.end())
+            throw args_count{};
+        return it;
+    };
     requests_args rargs{};
-    rargs.uri = args[0];
-    if (auto r = std::from_chars(args[1].begin(), args[1].end(), rargs.requests); r.ec != std::errc{}) {
-        log_msg(log_level::crit) << "Invalid number of requests to be executed";
-        return usage(argv0);
-    }
-    if (auto r = std::from_chars(args[2].begin(), args[2].end(), rargs.inserts);
-        r.ec != std::errc{} || rargs.inserts < 0.0 || rargs.inserts > 1.0)
-    {
-        log_msg(log_level::crit) << "Fraction of INSERT requests must be between 0.0 and 1.0";
-        return usage(argv0);
-    }
-    if (auto r = std::from_chars(args[3].begin(), args[3].end(), rargs.updates);
-        r.ec != std::errc{} || rargs.updates < 0.0 || rargs.updates > 1.0)
-    {
-        log_msg(log_level::crit) << "Fraction of UPDATE requests must be between 0.0 and 1.0";
-        return usage(argv0);
-    }
-    if (rargs.inserts + rargs.updates > 1.0) {
-        log_msg(log_level::crit) << "Sum of INSERT and UPDATE must be at most 1.0";
-        return usage(argv0);
-    }
-    if (auto r = std::from_chars(args[4].begin(), args[4].end(), rargs.value_sz);
-        r.ec != std::errc{} || rargs.value_sz < value_sz_min || rargs.value_sz > value_sz_max)
-    {
-        log_msg(log_level::crit) << "Value size (VALUE_SZ) must be between " << value_sz_min << " and " <<
-            value_sz_max;
-        return usage(argv0);
-    }
-    if (args.size() >= 6) {
-        if (auto r = std::from_chars(args[5].begin(), args[5].end(), rargs.threads);
-            r.ec != std::errc{} || rargs.threads < 1)
+    try {
+        rargs.uri = *next_arg();
+        rargs.keys = *next_arg();
+        next_arg();
+        if (unsigned v; std::from_chars(it->begin(), it->end(), v).ec != std::errc{} || v < 1) {
+            log_msg(log_level::crit) << "Invalid number of seconds for test duration";
+            return usage(argv0);
+        } else
+            rargs.time = std::chrono::duration_cast<decltype(rargs.time)>(std::chrono::seconds(v));
+        next_arg();
+        if (auto r = std::from_chars(it->begin(), it->end(), rargs.inserts);
+            r.ec != std::errc{} || rargs.inserts < 0.0 || rargs.inserts > 1.0)
         {
-            log_msg(log_level::crit) << "Number of threads (THREADS) must be at least 1";
+            log_msg(log_level::crit) << "Fraction of INSERT requests must be between 0.0 and 1.0";
             return usage(argv0);
         }
-    } else {
-        rargs.threads = std::thread::hardware_concurrency();
-        assert(rargs.threads > 0);
+        next_arg();
+        if (auto r = std::from_chars(it->begin(), it->end(), rargs.updates);
+            r.ec != std::errc{} || rargs.updates < 0.0 || rargs.updates > 1.0)
+        {
+            log_msg(log_level::crit) << "Fraction of UPDATE requests must be between 0.0 and 1.0";
+            return usage(argv0);
+        }
+        if (rargs.inserts + rargs.updates > 1.0) {
+            log_msg(log_level::crit) << "Sum of INSERT and UPDATE must be at most 1.0";
+            return usage(argv0);
+        }
+        next_arg();
+        if (auto r = std::from_chars(it->begin(), it->end(), rargs.value_sz);
+            r.ec != std::errc{} || rargs.value_sz < value_sz_min)
+        {
+            log_msg(log_level::crit) << "Value size (VALUE_SZ) must be at least " << value_sz_min;
+            return usage(argv0);
+        }
+        next_arg();
+        if (auto r = std::from_chars(it->begin(), it->end(), rargs.connections);
+            r.ec != std::errc{} || rargs.connections < 1)
+        {
+            log_msg(log_level::crit) << "Number of connections (CONNECTIONS) must be at least 1";
+            return usage(argv0);
+        }
+        if (++it != args.end()) {
+            if (auto r = std::from_chars(it->begin(), it->end(), rargs.threads);
+                r.ec != std::errc{} || rargs.threads < 1)
+            {
+                log_msg(log_level::crit) << "Number of threads (THREADS) must be at least 1";
+                return usage(argv0);
+            }
+            ++it;
+        } else {
+            rargs.threads = std::thread::hardware_concurrency();
+            assert(rargs.threads > 0);
+        }
+        if (it != args.end())
+            throw args_count{};
+    } catch (const args_count&) {
+        return usage(argv0);
     }
     // Prepare threaded HTTP client
+    known_key_generator known_keys(rargs.keys);
     // Run requests
     // TODO
     return EXIT_SUCCESS;

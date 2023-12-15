@@ -37,8 +37,8 @@ constexpr unsigned partitions_min = 1;
 constexpr unsigned partitions_max = 256;
 constexpr size_t key_sz = 32; // do not change this value
 constexpr size_t value_sz_min = 1;
-// The maximum number of outstanding requests for creation a database record
-constexpr unsigned long create_queue_max = 1'000;
+// The maximum number of outstanding database requests
+constexpr unsigned long request_queue_max = 1'000;
 // A duration message will be logged each time this number of new recods is created
 constexpr unsigned long create_log_interval = 100'000;
 constexpr unsigned transaction_sz = 100;
@@ -111,16 +111,18 @@ help
 
     Display this help message and exit.
 
-requests URI KEYS TIME INSERTS UPDATES VALUE_SZ CONNECTIONS [THREADS]
+requests PATH KEYS PARTITIONS TIME INSERTS UPDATES VALUE_SZ CACHE_KIB [THREADS]
 
     Execute database get/insert/update operations.
 
-    URI
-        The base URI of the server where requests will be sent.
+    PATH
+        The path and the initial part of filename for database files
     KEYS
         The path to the file containing concatenated binary values of partition
         index and key hash for every record in the database. It is used to
         quickly select existing records.
+    PARTITIONS
+        Number of database partitions
     TIME
         How long to generate requests, in seconds
     INSERTS
@@ -129,8 +131,9 @@ requests URI KEYS TIME INSERTS UPDATES VALUE_SZ CONNECTIONS [THREADS]
         The fraction of update operations in QUERIES
     VALUE_SZ
         The size of the variable-size part of each record
-    CONNECTIONS
-        The number of HTTP connections to the server
+    CACHE_KIB
+        The approximate amount of memory (in KiB) to use as the database cache.
+        It will be split among caches for individual database files.
     THREADS
         The number of worker threads. If unset then the number of threads will
         be equal to the number of CPUs.
@@ -139,6 +142,10 @@ requests URI KEYS TIME INSERTS UPDATES VALUE_SZ CONNECTIONS [THREADS]
 }
 
 namespace cmd {
+
+namespace requests_impl {
+class worker;
+} // namespace requests_impl
 
 /*** create ******************************************************************/
 
@@ -188,10 +195,11 @@ public:
         explicit exists(std::string_view path):
             std::runtime_error(std::string("Database file \"").append(path).append(" already exists")) {}
     };
-    class keys_write: public std::runtime_error {
+    class keys_write: public std::system_error {
     public:
         explicit keys_write(std::string_view path):
-            std::runtime_error(std::string("Cannot write keys file \"").append(path).append("\"")) {}
+            std::system_error(std::error_code(errno, std::generic_category()),
+                              std::string("Cannot write keys file \"").append(path).append("\"")) {}
     };
     partition(asio::io_context& ctx, const create_args& args, unsigned idx, bool create);
     partition(const partition&) = delete;
@@ -212,16 +220,21 @@ public:
         return std::string{path}.append(path_suffix_keys);
     }
     void handle_create(worker& wrk, db_record rec);
+    void handle_get(requests_impl::worker& wrk, size_t hash);
+    void handle_insert(requests_impl::worker& wrk, db_record rec);
+    void handle_update(requests_impl::worker& wrk, size_t hash);
     asio::io_context::strand strand;
     const create_args& args;
     const unsigned idx;
-private:
+protected:
     std::string path;
     std::optional<sqlite::connection> db;
     std::optional<sqlite::query> insert_data;
     std::optional<sqlite::query> insert_idx;
     std::optional<sqlite::query> begin_transaction;
     std::optional<sqlite::query> commit_transaction;
+    std::optional<sqlite::query> request_get;
+    std::optional<sqlite::query> request_update;
     unsigned cur_tx = 0;
     FILE* keys_file = nullptr;
 };
@@ -243,6 +256,20 @@ public:
             w.t1 = t;
             return {d1, d0};
         }
+        std::pair<bool, clock::duration> test() const {
+            auto tnow = clock::now();
+            auto d = tnow - w.t0;
+            auto t = w.tt.exchange(clock::time_point{});
+            if (t == clock::time_point{})
+                return {false, d};
+            if (tnow - t >= std::chrono::seconds{1}) {
+                w.tt = tnow;
+                return {true, d};
+            } else {
+                w.tt = t;
+                return {false, d};
+            }
+        }
     private:
         worker& w;
     };
@@ -256,11 +283,12 @@ public:
     void log_end() {
         log_msg(log_level::info) << "End records=" << records << " time=" << time();
     }
-private:
+protected:
     std::atomic<unsigned long> records = 0;
     partitions& parts;
     clock::time_point t0{};
     clock::time_point t1{};
+    std::atomic<clock::time_point> tt{};
 };
 
 /*** db_record ***/
@@ -295,8 +323,8 @@ partition::partition(asio::io_context& ctx, const create_args& args, unsigned id
         sqlite::connection idx(path_idx(), true);
     }
     db.emplace(path_data());
-    sqlite::query(*db, R"(attach database ?1 as idx)").start().bind(0, path_idx()).next_row();
     if (create) {
+        sqlite::query(*db, R"(attach database ?1 as idx)").start().bind(0, path_idx()).next_row();
         // speed up populating the database by turning off journaling and filesystem syncing
         sqlite::query(*db, R"(pragma main.journal_mode = off)").start().next_row();
         sqlite::query(*db, R"(pragma idx.journal_mode = off)").start().next_row();
@@ -323,6 +351,9 @@ partition::partition(asio::io_context& ctx, const create_args& args, unsigned id
             R"(create table idx.idx (hash int not null, id int not null, primary key (hash, id)) without rowid)").
             start().next_row();
     }
+    // run faster by tolerating lost transactions on system crash
+    sqlite::query(*db, R"(pragma main.synchronous = normal)").start().next_row();
+    //sqlite::query(*db, R"(pragma idx.synchronous = normal)").start().next_row();
     // Configure page caches for data and index database files. Cache size is
     // internally stored as the number of pages, therefore we must set it after
     // setting the page size. It is not remembered, therefore we must set it
@@ -333,15 +364,18 @@ partition::partition(asio::io_context& ctx, const create_args& args, unsigned id
     double idx_record = 8.0 /* overhead */ + 4.0 /* hash of key */ + 4 /* record id */;
     sqlite::query(*db, R"(pragma main.cache_size = )" +
                   std::to_string(int64_t(-cache_sz * data_record / (data_record + idx_record)))).start().next_row();
-    sqlite::query(*db, R"(pragma idx.cache_size = )" +
-                  std::to_string(int64_t(-cache_sz * idx_record / (data_record + idx_record)))).start().next_row();
+    //sqlite::query(*db, R"(pragma idx.cache_size = )" +
+    //              std::to_string(int64_t(-cache_sz * idx_record / (data_record + idx_record)))).start().next_row();
     if (keys_file = fopen(path_keys().c_str(), "ab"); !keys_file)
         throw keys_write(path_keys());
     // Prepare queries for inserting data
     insert_data.emplace(*db, R"(insert into main.data values (?1, ?2, ?3, ?4))");
-    insert_idx.emplace(*db, R"(insert into idx.idx values (?1, ?2))");
+    //insert_idx.emplace(*db, R"(insert into idx.idx values (?1, ?2))");
     begin_transaction.emplace(*db, R"(begin)");
     commit_transaction.emplace(*db, R"(commit)");
+    // Prepare queries for requests into existing database
+    request_get.emplace(*db,  R"(select hex(key), counter, hex(value) from data where hash = ?1 limit 1)");
+    request_update.emplace(*db, R"(update data set counter = counter + 1 where hash = ?1 returning hex(key), counter)");
 }
 
 partition::~partition()
@@ -349,7 +383,7 @@ partition::~partition()
     // enable WAL for regular database operation
     if (db) {
         sqlite::query(*db, R"(pragma main.journal_mode = wal)").start().next_row();
-        sqlite::query(*db, R"(pragma idx.journal_mode = wal)").start().next_row();
+        //sqlite::query(*db, R"(pragma idx.journal_mode = wal)").start().next_row();
     }
     if (keys_file)
         (void)fclose(keys_file);
@@ -358,7 +392,7 @@ partition::~partition()
 void partition::handle_create(worker& wrk, db_record rec)
 {
     assert(insert_data);
-    assert(insert_idx);
+    //assert(insert_idx);
     assert(begin_transaction);
     assert(commit_transaction);
     if (cur_tx == 0) {
@@ -414,6 +448,7 @@ void worker::init(unsigned long requests)
         create_record();
     t0 = std::chrono::steady_clock::now();
     t1 = t0;
+    tt = t0;
 }
 
 bool worker::is_done()
@@ -489,7 +524,7 @@ int create(std::string_view argv0, [[maybe_unused]] std::string_view cmd, std::s
     }
     // Generate data
     worker wrk(db);
-    auto requests = std::min(create_queue_max, cargs.records);
+    auto requests = std::min(request_queue_max, cargs.records);
     wrk.init(requests);
     log_msg(log_level::info) << "Begin with " << requests << " parallel requests time=" << wrk.time();
     threads.run(false);
@@ -510,15 +545,11 @@ int help(std::string_view argv0, [[maybe_unused]] std::string_view cmd,
 
 namespace requests_impl {
 
-struct requests_args {
-    std::string uri;
+struct requests_args: create_impl::create_args {
     std::string keys;
     std::chrono::steady_clock::duration time;
     double inserts;
     double updates;
-    size_t value_sz;
-    unsigned connections;
-    unsigned threads;
 };
 
 class known_key_generator {
@@ -527,15 +558,17 @@ public:
         unsigned partition;
         size_t hash;
     };
-    class keys_mmap: public std::runtime_error {
+    class keys_mmap: public std::system_error {
     public:
         explicit keys_mmap(std::string_view path):
-            std::runtime_error(std::string("Cannot mmap keys file \"").append(path).append("\"")) {}
+            std::system_error(std::error_code(errno, std::generic_category()),
+                              std::string("Cannot mmap keys file \"").append(path).append("\"")) {}
     };
     explicit known_key_generator(const std::filesystem::path& path);
     ~known_key_generator();
     key get_key();
     void add(const key& k) {
+        std::lock_guard lck(mtx);
         added.push_back(k);
     }
 private:
@@ -545,6 +578,43 @@ private:
     size_t sz;
     std::vector<key> added;
     std::mt19937_64 rnd;
+    std::mutex mtx;
+};
+
+class worker: public create_impl::worker {
+public:
+    enum class request {
+        get,
+        update,
+        insert,
+    };
+    explicit worker(create_impl::partitions& parts):
+        create_impl::worker(parts), known_keys(static_cast<const requests_args&>(parts[0]->args).keys),
+        rnd{std::random_device{}()}
+    {}
+    void init(unsigned long requests);
+    void create_request();
+    void request_get();
+    void request_update();
+    void request_insert();
+    bool is_done(request req);
+    void log_end() {
+        log_msg(log_level::info) << "End requests=" << records <<
+            " get=" << gets << " update=" << updates << " insert=" << inserts << " time=" << time();
+    }
+private:
+    double get_random();
+    known_key_generator known_keys;
+    std::mt19937_64 rnd;
+    std::uniform_real_distribution<> rnd_dist;
+    std::mutex mtx;
+    std::atomic<unsigned long> records1 = 0;
+    std::atomic<unsigned long> gets = 0;
+    std::atomic<unsigned long> gets1 = 0;
+    std::atomic<unsigned long> updates = 0;
+    std::atomic<unsigned long> updates1 = 0;
+    std::atomic<unsigned long> inserts = 0;
+    std::atomic<unsigned long> inserts1 = 0;
 };
 
 /*** known_key_generator ***/
@@ -559,10 +629,14 @@ known_key_generator::known_key_generator(const std::filesystem::path& path): rnd
     if (fd = open(path.c_str(), O_RDONLY); fd < 0)
         throw keys_mmap(path.native());
     data_sz = std::filesystem::file_size(path.c_str());
-    if (data = reinterpret_cast<unsigned char* >(mmap(nullptr, sz, PROT_READ, MAP_SHARED, fd, 0)); !data)
+    if (data = reinterpret_cast<unsigned char* >(mmap(nullptr, data_sz, PROT_READ, MAP_SHARED, fd, 0));
+        data == MAP_FAILED)
+    {
         throw keys_mmap(path.native());
+    }
     sz = data_sz / key_sz;
-    log_msg(log_level::notice) << "Mapped file \"" << path.native() << "\" containing " << sz << " keys";
+    log_msg(log_level::notice) << "Mapped file \"" << path.native() << "\" size=" << data_sz <<
+        " containing " << sz << " keys at " << static_cast<const void*>(data);
 }
 
 known_key_generator::~known_key_generator()
@@ -573,22 +647,182 @@ known_key_generator::~known_key_generator()
 
 known_key_generator::key known_key_generator::get_key()
 {
+    std::lock_guard lck(mtx);
     size_t i = rnd() % (sz + added.size());
     if (i >= sz)
         return added[i - sz];
     else {
-        key result{};
+        key result;
         result.partition = data[i * key_sz];
-        std::memcpy(&result.hash, data + i * key_sz + 1, sizeof(result.hash));
+        uint32_t hash;
+        std::memcpy(&hash, data + i * key_sz + 1, sizeof(hash));
+        result.hash = hash;
         return result;
     }
 }
 
+/*** worker ***/
+
+void worker::create_request()
+{
+    auto& args = static_cast<const requests_args&>(parts[0]->args);
+    auto r = get_random();
+    if (r < args.inserts)
+        request_insert();
+    else if (r <  args.inserts + args.updates)
+        request_update();
+    else
+        request_get();
+}
+
+double worker::get_random()
+{
+    std::lock_guard lck(mtx);
+    return rnd_dist(rnd);
+}
+
+void worker::init(unsigned long requests)
+{
+    for (unsigned long r = 0; r < requests; ++r)
+        create_request();
+    t0 = std::chrono::steady_clock::now();
+    t1 = t0;
+    tt = t0;
+}
+
+bool worker::is_done(request req)
+{
+    ++records;
+    ++records1;
+    switch (req) {
+    case request::get:
+        ++gets;
+        ++gets1;
+        break;
+    case request::update:
+        ++updates;
+        ++updates1;
+        break;
+    case request::insert:
+        ++inserts;
+        ++inserts1;
+        break;
+    default:
+        break;
+    }
+    auto [test, duration] = time_ref{*this}.test();
+    if (test) {
+        log_msg(log_level::info) << "Processed " << records1 << " requests " <<
+            " get=" << gets1 << " update=" << updates1 << " insert=" << inserts1 << " time=" << time();
+        records1 = 0;
+        gets1 = 0;
+        updates1 = 0;
+        inserts1 = 0;
+    }
+    return duration >= static_cast<const requests_args&>(parts[0]->args).time;
+}
+
+void worker::request_get()
+{
+    auto [partition, hash] = known_keys.get_key();
+    asio::post(asio::bind_executor(parts[partition]->strand,
+        [this, &p = *parts[partition], hash = hash]() {
+            p.handle_get(*this, hash);
+        }));
+}
+
+void worker::request_insert()
+{
+    static thread_local create_impl::db_record rec{create_impl::db_record::thread_init{}};
+    rec.update(parts.size(), parts[0]->args.value_sz);
+    asio::post(asio::bind_executor(parts[rec.partition]->strand,
+        [this, &p = *parts[rec.partition], rec = rec]() mutable {
+            p.handle_insert(*this, std::move(rec));
+        }));
+}
+
+void worker::request_update()
+{
+    auto [partition, hash] = known_keys.get_key();
+    asio::post(asio::bind_executor(parts[partition]->strand,
+        [this, &p = *parts[partition], hash = hash]() {
+            p.handle_update(*this, hash);
+        }));
+}
+
 } // namespace requests_impl
+
+namespace create_impl {
+
+/*** partition ***/
+
+void partition::handle_get(requests_impl::worker& wrk, size_t hash)
+{
+    assert(request_get);
+    auto s = request_get->start().bind(0, int64_t(hash)).next_row();
+    switch (s) {
+    case sqlite::query::status::row:
+        assert(request_get->column_count() == 3);
+        log_msg(log_level::debug) << "SELECT partition=" << idx << " hash=" << hash << " returned key=" <<
+            std::get<3>(request_get->get_column(0)) << " counter=" << std::get<int64_t>(request_get->get_column(1)) <<
+            " value=" << std::get<3>(request_get->get_column(2)).substr(0, 32) << "...";
+        assert(request_get->next_row() == sqlite::query::status::done);
+        break;
+    case sqlite::query::status::done:
+        log_msg(log_level::debug) << "SELECT partition=" << idx << " hash=" << hash << " no row";
+        break;
+    case sqlite::query::status::locked:
+    default:
+        assert(false);
+    }
+    if (!wrk.is_done(requests_impl::worker::request::get))
+        wrk.create_request();
+}
+
+void partition::handle_insert(requests_impl::worker& wrk, db_record rec)
+{
+    assert(insert_data);
+    log_msg(log_level::debug) << "INSERT partition=" << idx << " hash=" << rec.hash;
+    assert(insert_data->start().bind_blob(0, rec.key).bind(1, int64_t(rec.hash)).bind(2, rec.counter).
+           bind_blob(3, rec.value).next_row() == sqlite::query::status::done);
+    if (!wrk.is_done(requests_impl::worker::request::insert))
+        wrk.create_request();
+}
+
+void partition::handle_update(requests_impl::worker& wrk, size_t hash)
+{
+    assert(request_update);
+    auto s = request_update->start().bind(0, int64_t(hash)).next_row();
+    switch (s) {
+    case sqlite::query::status::row:
+        assert(request_update->column_count() == 2);
+        {
+            int n = 1;
+            auto key = std::get<3>(request_update->get_column(0));
+            auto counter = std::get<int64_t>(request_update->get_column(1));
+            while (request_update->next_row() == sqlite::query::status::row)
+                ++n;
+        log_msg(log_level::debug) << "UPDATE partition=" << idx << " hash=" << hash << " rows=" << n <<
+            " key=" << key << " counter=" << counter;
+        }
+        break;
+    case sqlite::query::status::done:
+        log_msg(log_level::debug) << "UPDATE partition=" << idx << " hash=" << hash << " no row";
+        break;
+    case sqlite::query::status::locked:
+    default:
+        assert(false);
+    }
+    if (!wrk.is_done(requests_impl::worker::request::update))
+        wrk.create_request();
+}
+
+} // namespace create_impl
 
 int requests(std::string_view argv0, [[maybe_unused]] std::string_view cmd,
              std::span<const std::string_view> args)
 {
+    using namespace create_impl;
     using namespace requests_impl;
     // Process command line arguments. This is a more defensive method than in cmd::create()
     auto it = args.end();
@@ -604,8 +838,16 @@ int requests(std::string_view argv0, [[maybe_unused]] std::string_view cmd,
     };
     requests_args rargs{};
     try {
-        rargs.uri = *next_arg();
+        rargs.path = *next_arg();
         rargs.keys = *next_arg();
+        next_arg();
+        if (auto r = std::from_chars(it->begin(), it->end(), rargs.partitions);
+            r.ec != std::errc{} || rargs.partitions < partitions_min || rargs.partitions > partitions_max)
+        {
+            log_msg(log_level::crit) << "Number of partitions (PARTITIONS) must be between " << partitions_min <<
+                " and " << partitions_max;
+            return usage(argv0);
+        }
         next_arg();
         if (unsigned v; std::from_chars(it->begin(), it->end(), v).ec != std::errc{} || v < 1) {
             log_msg(log_level::crit) << "Invalid number of seconds for test duration";
@@ -638,10 +880,10 @@ int requests(std::string_view argv0, [[maybe_unused]] std::string_view cmd,
             return usage(argv0);
         }
         next_arg();
-        if (auto r = std::from_chars(it->begin(), it->end(), rargs.connections);
-            r.ec != std::errc{} || rargs.connections < 1)
+        if (auto r = std::from_chars(it->begin(), it->end(), rargs.cache_kib);
+            r.ec != std::errc{})
         {
-            log_msg(log_level::crit) << "Number of connections (CONNECTIONS) must be at least 1";
+            log_msg(log_level::crit) << "Invalid number of KiB of memory to use as the page cache";
             return usage(argv0);
         }
         if (++it != args.end()) {
@@ -661,10 +903,21 @@ int requests(std::string_view argv0, [[maybe_unused]] std::string_view cmd,
     } catch (const args_count&) {
         return usage(argv0);
     }
-    // Prepare threaded HTTP client
-    known_key_generator known_keys(rargs.keys);
+    // Open database files
+    thread_pool threads(int(rargs.threads), "main");
+    partitions db{};
+    db.reserve(rargs.partitions);
+    for (decltype(rargs.partitions) part = 0; part < rargs.partitions; ++part) {
+        log_msg(log_level::info) << "Opening partition " << part;
+        db.push_back(std::make_unique<partition>(threads.ctx, rargs, part, false));
+    }
     // Run requests
-    // TODO
+    requests_impl::worker wrk(db);
+    wrk.init(request_queue_max);
+    log_msg(log_level::info) << "Begin with " << request_queue_max << " parallel requests time=" << wrk.time();
+    threads.run(false);
+    threads.wait();
+    wrk.log_end();
     return EXIT_SUCCESS;
 }
 
